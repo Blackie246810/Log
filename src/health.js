@@ -21,7 +21,7 @@ export function startHealthServer(client, port) {
     }
   });
 
-  server.listen(port, () => {
+  server.listen(port, '0.0.0.0' , () => {
     console.log(`Health server listening on port ${port} (GET /health)`);
   });
 

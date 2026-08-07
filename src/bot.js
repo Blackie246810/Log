@@ -22,7 +22,8 @@ for (const cmd of [logCmd, balanceCmd, historyCmd, undoCmd, categoriesCmd]) {
 
 client.once('clientReady', () => {
   console.log(`Logged in as ${client.user.tag}`);
-  startHealthServer(client, Number(process.env.HEALTH_PORT) || 3000);
+  const port = Number(process.env.PORT) || Number(process.env.HEALTH_PORT) || 3000;
+  startHealthServer(client, port);
 });
 
 client.on('interactionCreate', async (interaction) => {
