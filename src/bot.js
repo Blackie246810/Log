@@ -1,0 +1,70 @@
+import { Client, GatewayIntentBits, Collection } from 'discord.js';
+import dotenv from 'dotenv';
+import * as logCmd from './commands/log.js';
+import * as balanceCmd from './commands/balance.js';
+import * as historyCmd from './commands/history.js';
+import * as undoCmd from './commands/undo.js';
+import * as categoriesCmd from './commands/categories.js';
+import * as logModal from './modals/logModal.js';
+import * as noteModal from './modals/noteModal.js';
+import * as logNoteButton from './buttons/logNoteButton.js';
+import { logError, reportError } from './errorReporter.js';
+import { startHealthServer } from './health.js';
+
+dotenv.config();
+
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+
+client.commands = new Collection();
+for (const cmd of [logCmd, balanceCmd, historyCmd, undoCmd, categoriesCmd]) {
+  client.commands.set(cmd.data.name, cmd);
+}
+
+client.once('clientReady', () => {
+  console.log(`Logged in as ${client.user.tag}`);
+  startHealthServer(client, Number(process.env.HEALTH_PORT) || 3000);
+});
+
+client.on('interactionCreate', async (interaction) => {
+  try {
+    if (interaction.isChatInputCommand()) {
+      const command = client.commands.get(interaction.commandName);
+      if (!command) return;
+      await command.execute(interaction);
+      return;
+    }
+
+    if (interaction.isModalSubmit()) {
+      if (interaction.customId === logModal.customId) {
+        await logModal.handle(interaction);
+      } else if (interaction.customId.startsWith(noteModal.customIdPrefix)) {
+        await noteModal.handle(interaction);
+      }
+      return;
+    }
+
+    if (interaction.isButton()) {
+      if (interaction.customId.startsWith(logNoteButton.customIdPrefix)) {
+        await logNoteButton.handle(interaction);
+      }
+      return;
+    }
+  } catch (err) {
+    logError(`interaction:${interaction.type}`, err);
+    const payload = { content: 'Something went wrong handling that. Check the console for details.', ephemeral: false };
+    try {
+      if (interaction.replied || interaction.deferred) {
+        await interaction.followUp(payload);
+      } else {
+        await interaction.reply(payload);
+      }
+    } catch (replyErr) {
+      await reportError(client, 'interaction error-reply failed', replyErr);
+    }
+  }
+});
+
+client.login(process.env.DISCORD_TOKEN).catch(async (err) => {
+  console.error('[startup] failed to log in:', err);
+  process.exit(1);
+});

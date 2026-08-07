@@ -1,0 +1,14 @@
+# Secrets — never commit this. It has your DB password and Discord token.
+.env
+
+# Dependencies — reinstalled from package.json, never committed
+node_modules/
+
+# Logs
+npm-debug.log*
+*.log
+
+# OS/editor noise
+.DS_Store
+.vscode/
+.idea/
