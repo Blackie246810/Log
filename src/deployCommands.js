@@ -5,10 +5,12 @@ import * as balanceCmd from './commands/balance.js';
 import * as historyCmd from './commands/history.js';
 import * as undoCmd from './commands/undo.js';
 import * as categoriesCmd from './commands/categories.js';
+import * as fileCmd from './commands/file.js';
+import * as deleteCmd from './commands/delete.js';
 
 dotenv.config();
 
-const commands = [logCmd, balanceCmd, historyCmd, undoCmd, categoriesCmd].map((c) => c.data.toJSON());
+const commands = [logCmd, balanceCmd, historyCmd, undoCmd, categoriesCmd, fileCmd, deleteCmd].map((c) => c.data.toJSON());
 const rest = new REST().setToken(process.env.DISCORD_TOKEN);
 
 try {

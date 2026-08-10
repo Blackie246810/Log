@@ -20,14 +20,14 @@ export async function execute(interaction) {
     .setCustomId('category')
     .setLabel('Category')
     .setStyle(TextInputStyle.Short)
-    .setPlaceholder('e.g. Food/Drink — see /categories for full list')
+    .setPlaceholder('Transaction category')
     .setRequired(true);
 
   const amountInput = new TextInputBuilder()
     .setCustomId('amount')
     .setLabel('Amount')
     .setStyle(TextInputStyle.Short)
-    .setPlaceholder('e.g. 250')
+    .setPlaceholder('Numeric value of money involved')
     .setRequired(true);
 
   const paymentModeInput = new TextInputBuilder()

@@ -1,0 +1,42 @@
+import { ButtonBuilder, ButtonStyle, ActionRowBuilder } from 'discord.js';
+import { getLogById } from '../db.js';
+import { buildLogEmbed } from '../embeds.js';
+import { logError } from '../errorReporter.js';
+
+export const customId = 'delete-modal';
+
+export async function handle(interaction) {
+  const rawId = interaction.fields.getTextInputValue('entryId').trim();
+
+  if (!/^\d+$/.test(rawId)) {
+    const errorText = `Unexpected value for [entryId]\nexpected values: a positive whole number\ngiven value: ${rawId}`;
+    logError('delete-modal validation', errorText);
+    await interaction.reply({ content: errorText, ephemeral: false });
+    return;
+  }
+
+  let log;
+  try {
+    log = await getLogById(rawId);
+  } catch (err) {
+    logError('delete-modal lookup', err);
+    await interaction.reply({ content: 'Database error while looking up that entry. Check the console for details.', ephemeral: false });
+    return;
+  }
+
+  if (!log) {
+    await interaction.reply({ content: `No entry found with ID #${rawId}.`, ephemeral: false });
+    return;
+  }
+
+  const embed = buildLogEmbed(log);
+
+  const yesButton = new ButtonBuilder().setCustomId(`delete-confirm:yes:${log.id}`).setLabel('Yes').setStyle(ButtonStyle.Danger);
+  const noButton = new ButtonBuilder().setCustomId(`delete-confirm:no:${log.id}`).setLabel('No').setStyle(ButtonStyle.Secondary);
+
+  await interaction.reply({
+    content: 'Are you sure you want to delete this row?',
+    embeds: [embed],
+    components: [new ActionRowBuilder().addComponents(yesButton, noButton)],
+  });
+}

@@ -5,9 +5,13 @@ import * as balanceCmd from './commands/balance.js';
 import * as historyCmd from './commands/history.js';
 import * as undoCmd from './commands/undo.js';
 import * as categoriesCmd from './commands/categories.js';
+import * as fileCmd from './commands/file.js';
+import * as deleteCmd from './commands/delete.js';
 import * as logModal from './modals/logModal.js';
 import * as noteModal from './modals/noteModal.js';
+import * as deleteModal from './modals/deleteModal.js';
 import * as logNoteButton from './buttons/logNoteButton.js';
+import * as deleteConfirmButton from './buttons/deleteConfirmButton.js';
 import { logError, reportError } from './errorReporter.js';
 import { startHealthServer } from './health.js';
 
@@ -16,7 +20,7 @@ dotenv.config();
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 client.commands = new Collection();
-for (const cmd of [logCmd, balanceCmd, historyCmd, undoCmd, categoriesCmd]) {
+for (const cmd of [logCmd, balanceCmd, historyCmd, undoCmd, categoriesCmd, fileCmd, deleteCmd]) {
   client.commands.set(cmd.data.name, cmd);
 }
 
@@ -40,6 +44,8 @@ client.on('interactionCreate', async (interaction) => {
         await logModal.handle(interaction);
       } else if (interaction.customId.startsWith(noteModal.customIdPrefix)) {
         await noteModal.handle(interaction);
+      } else if (interaction.customId === deleteModal.customId) {
+        await deleteModal.handle(interaction);
       }
       return;
     }
@@ -47,6 +53,8 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.isButton()) {
       if (interaction.customId.startsWith(logNoteButton.customIdPrefix)) {
         await logNoteButton.handle(interaction);
+      } else if (interaction.customId.startsWith(deleteConfirmButton.customIdPrefix)) {
+        await deleteConfirmButton.handle(interaction);
       }
       return;
     }
