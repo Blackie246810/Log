@@ -1,13 +1,9 @@
-import { ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder } from 'discord.js';
+import { ButtonBuilder, ButtonStyle, ActionRowBuilder } from 'discord.js';
 import { getLogById } from '../db.js';
-import { formatDDMMYYYY } from '../constants.js';
+import { buildLogEmbed } from '../embeds.js';
 import { logError } from '../errorReporter.js';
 
 export const customId = 'edit-id-modal';
-
-function capitalize(s) {
-  return s.charAt(0).toUpperCase() + s.slice(1);
-}
 
 export async function handle(interaction) {
   const rawId = interaction.fields.getTextInputValue('entryId').trim();
@@ -33,37 +29,15 @@ export async function handle(interaction) {
     return;
   }
 
-  const modal = new ModalBuilder()
-    .setCustomId(`edit-fields-modal:${log.id}`)
-    .setTitle(`Edit entry #${log.id}`);
+  const embed = buildLogEmbed(log);
+  const continueButton = new ButtonBuilder()
+    .setCustomId(`edit-start:${log.id}`)
+    .setLabel('Continue')
+    .setStyle(ButtonStyle.Primary);
 
-  const dateInput = new TextInputBuilder()
-    .setCustomId('date').setLabel('Date (DD-MM-YYYY)').setStyle(TextInputStyle.Short)
-    .setValue(formatDDMMYYYY(new Date(log.createdAt))).setRequired(true);
-
-  const categoryInput = new TextInputBuilder()
-    .setCustomId('category').setLabel('Category').setStyle(TextInputStyle.Short)
-    .setValue(log.category).setRequired(true);
-
-  const amountInput = new TextInputBuilder()
-    .setCustomId('amount').setLabel('Amount').setStyle(TextInputStyle.Short)
-    .setValue(String(Number(log.amount))).setRequired(true);
-
-  const paymentModeInput = new TextInputBuilder()
-    .setCustomId('payment_mode').setLabel('Payment mode').setStyle(TextInputStyle.Short)
-    .setValue(capitalize(log.paymentMode)).setRequired(true);
-
-  const paymentFlowInput = new TextInputBuilder()
-    .setCustomId('payment_flow').setLabel('Payment flow').setStyle(TextInputStyle.Short)
-    .setValue(capitalize(log.type)).setRequired(true);
-
-  modal.addComponents(
-    new ActionRowBuilder().addComponents(dateInput),
-    new ActionRowBuilder().addComponents(categoryInput),
-    new ActionRowBuilder().addComponents(amountInput),
-    new ActionRowBuilder().addComponents(paymentModeInput),
-    new ActionRowBuilder().addComponents(paymentFlowInput),
-  );
-
-  await interaction.showModal(modal);
+  await interaction.reply({
+    content: `Editing entry #${log.id}. Click Continue to open the edit form.`,
+    embeds: [embed],
+    components: [new ActionRowBuilder().addComponents(continueButton)],
+  });
 }

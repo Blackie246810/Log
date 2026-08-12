@@ -19,6 +19,7 @@ import * as editNoteModal from './modals/editNoteModal.js';
 import * as logNoteButton from './buttons/logNoteButton.js';
 import * as deleteConfirmButton from './buttons/deleteConfirmButton.js';
 import * as editConfirmButton from './buttons/editConfirmButton.js';
+import * as editStartButton from './buttons/editStartButton.js';
 import { logError, reportError } from './errorReporter.js';
 import { startHealthServer } from './health.js';
 
@@ -77,6 +78,8 @@ client.on('interactionCreate', async (interaction) => {
         await deleteConfirmButton.handle(interaction);
       } else if (interaction.customId.startsWith(editConfirmButton.customIdPrefix)) {
         await editConfirmButton.handle(interaction);
+      } else if (interaction.customId.startsWith(editStartButton.customIdPrefix)) {
+        await editStartButton.handle(interaction);
       }
       return;
     }
