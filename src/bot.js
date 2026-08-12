@@ -7,11 +7,18 @@ import * as undoCmd from './commands/undo.js';
 import * as categoriesCmd from './commands/categories.js';
 import * as fileCmd from './commands/file.js';
 import * as deleteCmd from './commands/delete.js';
+import * as editCmd from './commands/edit.js';
 import * as logModal from './modals/logModal.js';
 import * as noteModal from './modals/noteModal.js';
 import * as deleteModal from './modals/deleteModal.js';
+import * as historyModal from './modals/historyModal.js';
+import * as fileModal from './modals/fileModal.js';
+import * as editIdModal from './modals/editIdModal.js';
+import * as editFieldsModal from './modals/editFieldsModal.js';
+import * as editNoteModal from './modals/editNoteModal.js';
 import * as logNoteButton from './buttons/logNoteButton.js';
 import * as deleteConfirmButton from './buttons/deleteConfirmButton.js';
+import * as editConfirmButton from './buttons/editConfirmButton.js';
 import { logError, reportError } from './errorReporter.js';
 import { startHealthServer } from './health.js';
 
@@ -23,11 +30,11 @@ const client = new Client({
 });
 
 client.commands = new Collection();
-for (const cmd of [logCmd, balanceCmd, historyCmd, undoCmd, categoriesCmd, fileCmd, deleteCmd]) {
+for (const cmd of [logCmd, balanceCmd, historyCmd, undoCmd, categoriesCmd, fileCmd, deleteCmd, editCmd]) {
   client.commands.set(cmd.data.name, cmd);
 }
 
-client.once('clientReady', () => {
+client.once('ready', () => {
   console.log(`Logged in as ${client.user.tag}`);
   const port = Number(process.env.PORT) || Number(process.env.HEALTH_PORT) || 3000;
   startHealthServer(client, port);
@@ -49,6 +56,16 @@ client.on('interactionCreate', async (interaction) => {
         await noteModal.handle(interaction);
       } else if (interaction.customId === deleteModal.customId) {
         await deleteModal.handle(interaction);
+      } else if (interaction.customId === historyModal.customId) {
+        await historyModal.handle(interaction);
+      } else if (interaction.customId === fileModal.customId) {
+        await fileModal.handle(interaction);
+      } else if (interaction.customId === editIdModal.customId) {
+        await editIdModal.handle(interaction);
+      } else if (interaction.customId.startsWith(editFieldsModal.customIdPrefix)) {
+        await editFieldsModal.handle(interaction);
+      } else if (interaction.customId.startsWith(editNoteModal.customIdPrefix)) {
+        await editNoteModal.handle(interaction);
       }
       return;
     }
@@ -58,6 +75,8 @@ client.on('interactionCreate', async (interaction) => {
         await logNoteButton.handle(interaction);
       } else if (interaction.customId.startsWith(deleteConfirmButton.customIdPrefix)) {
         await deleteConfirmButton.handle(interaction);
+      } else if (interaction.customId.startsWith(editConfirmButton.customIdPrefix)) {
+        await editConfirmButton.handle(interaction);
       }
       return;
     }
