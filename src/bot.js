@@ -34,7 +34,7 @@ for (const cmd of [logCmd, balanceCmd, historyCmd, undoCmd, categoriesCmd, fileC
   client.commands.set(cmd.data.name, cmd);
 }
 
-client.once('ready', () => {
+client.once('clientReady', () => {
   console.log(`Logged in as ${client.user.tag}`);
   const port = Number(process.env.PORT) || Number(process.env.HEALTH_PORT) || 3000;
   startHealthServer(client, port);
@@ -82,7 +82,7 @@ client.on('interactionCreate', async (interaction) => {
     }
   } catch (err) {
     logError(`interaction:${interaction.type}`, err);
-    const payload = { content: 'Something went wrong handling that. Check the console for details.', ephemeral: false };
+    const payload = { content: 'Something went wrong handling that. Check the console for details.' };
     try {
       if (interaction.replied || interaction.deferred) {
         await interaction.followUp(payload);

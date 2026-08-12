@@ -13,14 +13,14 @@ export async function handle(interaction) {
     saved = await setLogNote(logId, note);
   } catch (err) {
     logError('note-modal DB write', err);
-    await interaction.reply({ content: `Entry #${logId} was logged, but saving the note failed — check the console.`, ephemeral: false });
+    await interaction.reply({ content: `Entry #${logId} was logged, but saving the note failed — check the console.` });
     return;
   }
 
   if (!saved) {
     const err = new Error(`setLogNote found no row for logId=${logId}`);
     logError('note-modal missing entry', err);
-    await interaction.reply({ content: `Couldn't find entry #${logId} to attach the note to.`, ephemeral: false });
+    await interaction.reply({ content: `Couldn't find entry #${logId} to attach the note to.` });
     return;
   }
 

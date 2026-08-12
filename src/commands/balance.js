@@ -22,6 +22,6 @@ export async function execute(interaction) {
     await interaction.reply({ embeds: [embed] });
   } catch (err) {
     logError('balance command', err);
-    await interaction.reply({ content: 'Failed to fetch balance. Check the console for details.', ephemeral: false });
+    await interaction.reply({ content: 'Failed to fetch balance. Check the console for details.' });
   }
 }

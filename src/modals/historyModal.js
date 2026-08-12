@@ -15,7 +15,7 @@ export async function handle(interaction) {
     if (!Number.isInteger(count) || count < 1 || count > 25) {
       const errorText = `Unexpected value for [count]\nexpected values: a whole number from 1 to 25\ngiven value: ${rawCount}`;
       logError('history-modal validation', errorText);
-      await interaction.reply({ content: errorText, ephemeral: false });
+      await interaction.reply({ content: errorText });
       return;
     }
   }
@@ -23,7 +23,7 @@ export async function handle(interaction) {
   try {
     const rows = await getRecentHistory(count);
     if (rows.length === 0) {
-      await interaction.reply({ content: 'No entries logged yet.', ephemeral: false });
+      await interaction.reply({ content: 'No entries logged yet.' });
       return;
     }
 
@@ -43,6 +43,6 @@ export async function handle(interaction) {
     await interaction.reply({ embeds: [embed] });
   } catch (err) {
     logError('history command', err);
-    await interaction.reply({ content: 'Failed to fetch history. Check the console for details.', ephemeral: false });
+    await interaction.reply({ content: 'Failed to fetch history. Check the console for details.' });
   }
 }

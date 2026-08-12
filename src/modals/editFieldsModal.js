@@ -49,7 +49,7 @@ export async function handle(interaction) {
   if (errorBlocks.length > 0) {
     const errorText = errorBlocks.join('\n\n');
     logError('edit-fields-modal validation', errorText);
-    await interaction.reply({ content: errorText, ephemeral: false });
+    await interaction.reply({ content: errorText });
     return;
   }
 
@@ -58,11 +58,11 @@ export async function handle(interaction) {
     original = await getLogById(logId);
   } catch (err) {
     logError('edit-fields-modal lookup', err);
-    await interaction.reply({ content: 'Database error while looking up that entry. Check the console for details.', ephemeral: false });
+    await interaction.reply({ content: 'Database error while looking up that entry. Check the console for details.' });
     return;
   }
   if (!original) {
-    await interaction.reply({ content: `Entry #${logId} no longer exists.`, ephemeral: false });
+    await interaction.reply({ content: `Entry #${logId} no longer exists.` });
     return;
   }
 

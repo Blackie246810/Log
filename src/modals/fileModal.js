@@ -37,14 +37,14 @@ export async function handle(interaction) {
   if (errorBlocks.length > 0) {
     const errorText = errorBlocks.join('\n\n');
     logError('file-modal validation', errorText);
-    await interaction.reply({ content: errorText, ephemeral: false });
+    await interaction.reply({ content: errorText });
     return;
   }
 
   if (fromDate.getTime() > toDate.getTime()) {
     const errorText = `Unexpected value for [from]\nexpected values: a date on or before [to]\ngiven value: from is after to`;
     logError('file-modal validation', errorText);
-    await interaction.reply({ content: errorText, ephemeral: false });
+    await interaction.reply({ content: errorText });
     return;
   }
 

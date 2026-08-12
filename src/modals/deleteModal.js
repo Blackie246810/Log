@@ -11,7 +11,7 @@ export async function handle(interaction) {
   if (!/^\d+$/.test(rawId)) {
     const errorText = `Unexpected value for [entryId]\nexpected values: a positive whole number\ngiven value: ${rawId}`;
     logError('delete-modal validation', errorText);
-    await interaction.reply({ content: errorText, ephemeral: false });
+    await interaction.reply({ content: errorText });
     return;
   }
 
@@ -20,12 +20,12 @@ export async function handle(interaction) {
     log = await getLogById(rawId);
   } catch (err) {
     logError('delete-modal lookup', err);
-    await interaction.reply({ content: 'Database error while looking up that entry. Check the console for details.', ephemeral: false });
+    await interaction.reply({ content: 'Database error while looking up that entry. Check the console for details.' });
     return;
   }
 
   if (!log) {
-    await interaction.reply({ content: `No entry found with ID #${rawId}.`, ephemeral: false });
+    await interaction.reply({ content: `No entry found with ID #${rawId}.` });
     return;
   }
 

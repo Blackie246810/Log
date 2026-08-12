@@ -10,7 +10,7 @@ export async function handle(interaction) {
 
   const pending = getPendingEdit(logId);
   if (!pending) {
-    await interaction.reply({ content: `Edit session for entry #${logId} expired — please run /edit again.`, ephemeral: false });
+    await interaction.reply({ content: `Edit session for entry #${logId} expired — please run /edit again.` });
     return;
   }
 
@@ -31,14 +31,14 @@ export async function handle(interaction) {
     });
   } catch (err) {
     logError('edit-note-modal DB write', err);
-    await interaction.reply({ content: `Database error — entry #${logId} was NOT updated. Check the console for details.`, ephemeral: false });
+    await interaction.reply({ content: `Database error — entry #${logId} was NOT updated. Check the console for details.` });
     return;
   }
 
   clearPendingEdit(logId);
 
   if (!result) {
-    await interaction.reply({ content: `Entry #${logId} no longer exists — nothing was updated.`, ephemeral: false });
+    await interaction.reply({ content: `Entry #${logId} no longer exists — nothing was updated.` });
     return;
   }
 

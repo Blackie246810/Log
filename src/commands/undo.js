@@ -11,7 +11,7 @@ export async function execute(interaction) {
   try {
     const result = await undoLastEntry();
     if (!result) {
-      await interaction.reply({ content: 'Nothing to undo — no entries exist.', ephemeral: false });
+      await interaction.reply({ content: 'Nothing to undo — no entries exist.' });
       return;
     }
 
@@ -31,6 +31,6 @@ export async function execute(interaction) {
     await interaction.reply({ embeds: [embed] });
   } catch (err) {
     logError('undo command', err);
-    await interaction.reply({ content: 'Failed to undo. Check the console for details.', ephemeral: false });
+    await interaction.reply({ content: 'Failed to undo. Check the console for details.' });
   }
 }

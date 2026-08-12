@@ -44,7 +44,7 @@ export async function handle(interaction) {
   if (errorBlocks.length > 0) {
     const errorText = errorBlocks.join('\n\n');
     logError('log-modal validation', errorText);
-    await interaction.reply({ content: errorText, ephemeral: false });
+    await interaction.reply({ content: errorText });
     return;
   }
 
@@ -59,7 +59,7 @@ export async function handle(interaction) {
     });
   } catch (err) {
     logError('log-modal DB write', err);
-    await interaction.reply({ content: 'Database error — nothing was written. Check the console for details.', ephemeral: false });
+    await interaction.reply({ content: 'Database error — nothing was written. Check the console for details.' });
     return;
   }
 
