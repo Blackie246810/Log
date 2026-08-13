@@ -8,10 +8,11 @@ import * as categoriesCmd from './commands/categories.js';
 import * as fileCmd from './commands/file.js';
 import * as deleteCmd from './commands/delete.js';
 import * as editCmd from './commands/edit.js';
+import * as clearCmd from './commands/clear.js';
 
 dotenv.config();
 
-const commands = [logCmd, balanceCmd, historyCmd, undoCmd, categoriesCmd, fileCmd, deleteCmd, editCmd].map((c) => c.data.toJSON());
+const commands = [logCmd, balanceCmd, historyCmd, undoCmd, categoriesCmd, fileCmd, deleteCmd, editCmd, clearCmd].map((c) => c.data.toJSON());
 const rest = new REST().setToken(process.env.DISCORD_TOKEN);
 
 try {

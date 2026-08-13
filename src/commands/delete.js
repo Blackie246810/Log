@@ -12,7 +12,7 @@ export async function execute(interaction) {
     .setCustomId('entryId')
     .setLabel('Entry ID')
     .setStyle(TextInputStyle.Short)
-    .setPlaceholder('Id of the log')
+    .setPlaceholder('Entry ID or ID of the log')
     .setRequired(true);
 
   modal.addComponents(new ActionRowBuilder().addComponents(idInput));
