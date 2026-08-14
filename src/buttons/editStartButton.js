@@ -10,7 +10,12 @@ function capitalize(s) {
 }
 
 export async function handle(interaction) {
-  const [, logId] = interaction.customId.split(':');
+  const [, action, logId] = interaction.customId.split(':');
+
+  if (action === 'cancel') {
+    await interaction.update({ content: 'Editing cancelled.', embeds: [], components: [] });
+    return;
+  }
 
   let log;
   try {

@@ -31,13 +31,17 @@ export async function handle(interaction) {
 
   const embed = buildLogEmbed(log);
   const continueButton = new ButtonBuilder()
-    .setCustomId(`edit-start:${log.id}`)
+    .setCustomId(`edit-start:continue:${log.id}`)
     .setLabel('Continue')
     .setStyle(ButtonStyle.Primary);
+  const cancelButton = new ButtonBuilder()
+    .setCustomId(`edit-start:cancel:${log.id}`)
+    .setLabel('Cancel')
+    .setStyle(ButtonStyle.Secondary);
 
   await interaction.reply({
     content: `Editing entry #${log.id}. Click Continue to open the edit form.`,
     embeds: [embed],
-    components: [new ActionRowBuilder().addComponents(continueButton)],
+    components: [new ActionRowBuilder().addComponents(continueButton, cancelButton)],
   });
 }
