@@ -29,7 +29,7 @@ async function getLatestBalance(client) {
   };
 }
 
-export async function addLogEntry({ type, amount, category, paymentMode, discordUserId, createdAt }) {
+export async function addLogEntry({ type, amount, category, paymentMode, createdAt }) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -42,10 +42,10 @@ export async function addLogEntry({ type, amount, category, paymentMode, discord
     const total = cashBalance + cardBalance;
 
     const logResult = await client.query(
-      `INSERT INTO "Logs" ("Type", "Amount", "Category", "Payment mode", "Discord user id", "Created at")
-       VALUES ($1, $2, $3, $4, $5, COALESCE($6, now()))
+      `INSERT INTO "Logs" ("Type", "Amount", "Category", "Payment mode", "Created at")
+       VALUES ($1, $2, $3, $4, COALESCE($5, now()))
        RETURNING "Id" AS "id", "Created at" AS "createdAt"`,
-      [type, amount, category, paymentMode, discordUserId, createdAt ?? null]
+      [type, amount, category, paymentMode, createdAt ?? null]
     );
     const log = logResult.rows[0];
 
@@ -111,6 +111,7 @@ export async function deleteLogById(logId) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+
     const { rows: existing } = await client.query(
       `SELECT "Id" AS "id", "Type" AS "type", "Amount" AS "amount", "Category" AS "category",
               "Payment mode" AS "paymentMode", "Note" AS "note"
@@ -122,8 +123,10 @@ export async function deleteLogById(logId) {
       return null;
     }
     const deleted = existing[0];
+
     await client.query(`DELETE FROM "Logs" WHERE "Id" = $1`, [logId]);
     const restored = await rebuildAllBalances(client);
+
     await client.query('COMMIT');
     return { deleted, restored };
   } catch (err) {
@@ -224,4 +227,64 @@ export async function getLogsBetween(fromDate, toDate) {
 
 export async function pingDatabase() {
   await pool.query('SELECT 1');
+}
+
+export async function getSpendingByCategory(fromDate, toDate) {
+  const { rows } = await pool.query(
+    `SELECT "Category" AS "category", "Type" AS "type",
+            SUM("Amount") AS "total", COUNT(*) AS "count"
+     FROM "Logs"
+     WHERE "Created at" BETWEEN $1 AND $2
+     GROUP BY "Category", "Type"
+     ORDER BY "total" DESC`,
+    [fromDate, toDate]
+  );
+  return rows.map((r) => ({
+    category: r.category,
+    type: r.type,
+    total: Number(r.total),
+    count: Number(r.count),
+  }));
+}
+
+export async function getTotals(fromDate, toDate) {
+  const { rows } = await pool.query(
+    `SELECT "Type" AS "type", SUM("Amount") AS "total", COUNT(*) AS "count"
+     FROM "Logs"
+     WHERE "Created at" BETWEEN $1 AND $2
+     GROUP BY "Type"`,
+    [fromDate, toDate]
+  );
+  const result = { income: 0, incomeCount: 0, expense: 0, expenseCount: 0 };
+  for (const r of rows) {
+    if (r.type === 'income') {
+      result.income = Number(r.total);
+      result.incomeCount = Number(r.count);
+    } else {
+      result.expense = Number(r.total);
+      result.expenseCount = Number(r.count);
+    }
+  }
+  return result;
+}
+
+export async function getConversationHistory() {
+  const { rows } = await pool.query(
+    `SELECT "Content" AS "content" FROM "Conversations" WHERE "Id" = 1`
+  );
+  return rows[0]?.content ?? [];
+}
+
+export async function saveConversationHistory(content) {
+  await pool.query(
+    `INSERT INTO "Conversations" ("Id", "Content", "Updated at")
+     VALUES (1, $1, now())
+     ON CONFLICT ("Id")
+     DO UPDATE SET "Content" = EXCLUDED."Content", "Updated at" = now()`,
+    [JSON.stringify(content)]
+  );
+}
+
+export async function clearConversationHistory() {
+  await pool.query(`DELETE FROM "Conversations" WHERE "Id" = 1`);
 }

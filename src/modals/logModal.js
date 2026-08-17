@@ -17,28 +17,38 @@ export async function handle(interaction) {
 
   const parsedDate = parseDateDDMMYYYY(rawDate);
   if (!parsedDate) {
-    errorBlocks.push(`Unexpected value for [date]\nexpected values: DD-MM-YYYY format\ngiven value: ${rawDate}`);
+    errorBlocks.push(
+      `Unexpected value for [date]\nexpected values: DD-MM-YYYY format\ngiven value: ${rawDate}`
+    );
   }
 
   const category = matchCanonical(rawCategory, CATEGORIES);
   if (!category) {
-    errorBlocks.push(`Unexpected value for [category]\nexpected values: ${CATEGORIES.join(', ')}\ngiven value: ${rawCategory}`);
+    errorBlocks.push(
+      `Unexpected value for [category]\nexpected values: ${CATEGORIES.join(', ')}\ngiven value: ${rawCategory}`
+    );
   }
 
   const amountNum = Number(rawAmount);
   const amountValid = Number.isFinite(amountNum) && amountNum > 0;
   if (!amountValid) {
-    errorBlocks.push(`Unexpected value for [amount]\nexpected values: a positive number\ngiven value: ${rawAmount}`);
+    errorBlocks.push(
+      `Unexpected value for [amount]\nexpected values: a positive number\ngiven value: ${rawAmount}`
+    );
   }
 
   const paymentModeCanon = matchCanonical(rawPaymentMode, PAYMENT_MODES);
   if (!paymentModeCanon) {
-    errorBlocks.push(`Unexpected value for [payment_mode]\nexpected values: ${PAYMENT_MODES.join(', ')}\ngiven value: ${rawPaymentMode}`);
+    errorBlocks.push(
+      `Unexpected value for [payment_mode]\nexpected values: ${PAYMENT_MODES.join(', ')}\ngiven value: ${rawPaymentMode}`
+    );
   }
 
   const paymentFlowCanon = matchCanonical(rawPaymentFlow, PAYMENT_FLOWS);
   if (!paymentFlowCanon) {
-    errorBlocks.push(`Unexpected value for [payment_flow]\nexpected values: ${PAYMENT_FLOWS.join(', ')}\ngiven value: ${rawPaymentFlow}`);
+    errorBlocks.push(
+      `Unexpected value for [payment_flow]\nexpected values: ${PAYMENT_FLOWS.join(', ')}\ngiven value: ${rawPaymentFlow}`
+    );
   }
 
   if (errorBlocks.length > 0) {
@@ -54,8 +64,7 @@ export async function handle(interaction) {
   let result;
   try {
     result = await addLogEntry({
-      type, amount: amountNum, category, paymentMode,
-      discordUserId: interaction.user.id, createdAt: parsedDate,
+      type, amount: amountNum, category, paymentMode, createdAt: parsedDate,
     });
   } catch (err) {
     logError('log-modal DB write', err);
@@ -68,8 +77,14 @@ export async function handle(interaction) {
     result
   );
 
-  const yesButton = new ButtonBuilder().setCustomId(`log-note:yes:${result.logId}`).setLabel('Yes').setStyle(ButtonStyle.Primary);
-  const noButton = new ButtonBuilder().setCustomId(`log-note:no:${result.logId}`).setLabel('No').setStyle(ButtonStyle.Secondary);
+  const yesButton = new ButtonBuilder()
+    .setCustomId(`log-note:yes:${result.logId}`)
+    .setLabel('Yes')
+    .setStyle(ButtonStyle.Primary);
+  const noButton = new ButtonBuilder()
+    .setCustomId(`log-note:no:${result.logId}`)
+    .setLabel('No')
+    .setStyle(ButtonStyle.Secondary);
 
   await interaction.reply({
     content: 'Do you want to type a description/note?',

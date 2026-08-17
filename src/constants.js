@@ -1,7 +1,7 @@
 export const CATEGORIES = [
   'Food/Drink', 'Travel', 'Stationary/Grocery', 'Income', 'Exchange',
   'Laundry', 'Recharge', 'Other services', 'Interpersonal transactions',
-  'Fees', 'Assignment',
+  'Fees', 'Assignment', 'Salary',
 ];
 
 export const PAYMENT_MODES = ['Physical', 'Digital'];
@@ -12,13 +12,14 @@ export function matchCanonical(input, canonicalList) {
   return found ?? null;
 }
 
-
 function parseDDMMYYYYComponents(input) {
   const match = /^(\d{2})-(\d{2})-(\d{4})$/.exec(input.trim());
   if (!match) return null;
+
   const day = Number(match[1]);
   const month = Number(match[2]);
   const year = Number(match[3]);
+
   const probe = new Date(year, month - 1, day, 12, 0, 0, 0);
   if (probe.getDate() !== day || probe.getMonth() !== month - 1 || probe.getFullYear() !== year) {
     return null;
