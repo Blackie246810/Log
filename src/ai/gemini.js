@@ -3,7 +3,7 @@ import { toolDeclarations, callTool } from './tools.js';
 import { CATEGORIES } from '../constants.js';
 import { getConversationHistory, saveConversationHistory, clearConversationHistory } from '../db.js';
 
-const MODEL = 'gemini-2.5-flash';
+const MODEL = 'gemini-3.6-flash';
 const MAX_HISTORY_TURNS = 500;
 const MAX_TOOL_HOPS = 5;
 
@@ -71,7 +71,7 @@ export async function askAi(userMessage, botName, client = getDefaultClient()) {
       } catch (err) {
         result = { error: err.message };
       }
-      responseParts.push({ functionResponse: { name: call.name, response: { result } } });
+      responseParts.push({ functionResponse: { id: call.id, name: call.name, response: { result } } });
     }
     contents.push({ role: 'user', parts: responseParts });
   }
