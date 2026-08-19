@@ -49,6 +49,7 @@ export async function askAi(userMessage, botName, client = getDefaultClient()) {
       config: {
         systemInstruction,
         tools: [{ functionDeclarations: toolDeclarations }],
+        thinkingConfig: { thinkingLevel: 'medium' },
       },
     });
 
