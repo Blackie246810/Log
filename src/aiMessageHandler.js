@@ -4,6 +4,7 @@ import { logError } from './errorReporter.js';
 const DISCORD_MESSAGE_LIMIT = 2000;
 
 export async function handleAiMessage(message) {
+  if (message.author.bot) return;
   if (message.author.id !== process.env.DISCORD_OWNER_ID) return;
 
   const text = message.content?.trim();
@@ -16,7 +17,7 @@ export async function handleAiMessage(message) {
   }
 
   try {
-    const reply = await askAi(text);
+    const reply = await askAi(text, message.client.user.username);
     await message.reply(reply.slice(0, DISCORD_MESSAGE_LIMIT));
   } catch (err) {
     logError('ai message handler', err);

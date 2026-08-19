@@ -229,43 +229,20 @@ export async function pingDatabase() {
   await pool.query('SELECT 1');
 }
 
-export async function getSpendingByCategory(fromDate, toDate) {
-  const { rows } = await pool.query(
-    `SELECT "Category" AS "category", "Type" AS "type",
-            SUM("Amount") AS "total", COUNT(*) AS "count"
-     FROM "Logs"
-     WHERE "Created at" BETWEEN $1 AND $2
-     GROUP BY "Category", "Type"
-     ORDER BY "total" DESC`,
-    [fromDate, toDate]
-  );
-  return rows.map((r) => ({
-    category: r.category,
-    type: r.type,
-    total: Number(r.total),
-    count: Number(r.count),
-  }));
-}
-
-export async function getTotals(fromDate, toDate) {
-  const { rows } = await pool.query(
-    `SELECT "Type" AS "type", SUM("Amount") AS "total", COUNT(*) AS "count"
-     FROM "Logs"
-     WHERE "Created at" BETWEEN $1 AND $2
-     GROUP BY "Type"`,
-    [fromDate, toDate]
-  );
-  const result = { income: 0, incomeCount: 0, expense: 0, expenseCount: 0 };
-  for (const r of rows) {
-    if (r.type === 'income') {
-      result.income = Number(r.total);
-      result.incomeCount = Number(r.count);
-    } else {
-      result.expense = Number(r.total);
-      result.expenseCount = Number(r.count);
-    }
+export async function runReadOnlyQuery(sql, params) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN TRANSACTION READ ONLY');
+    await client.query(`SET LOCAL statement_timeout = '5s'`);
+    const { rows } = await client.query(sql, params);
+    await client.query('COMMIT');
+    return rows;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
   }
-  return result;
 }
 
 export async function getConversationHistory() {

@@ -8,6 +8,7 @@ import * as categoriesCmd from './commands/categories.js';
 import * as fileCmd from './commands/file.js';
 import * as deleteCmd from './commands/delete.js';
 import * as editCmd from './commands/edit.js';
+import * as clearCmd from './commands/clear.js';
 import * as logModal from './modals/logModal.js';
 import * as noteModal from './modals/noteModal.js';
 import * as deleteModal from './modals/deleteModal.js';
@@ -22,16 +23,17 @@ import * as editConfirmButton from './buttons/editConfirmButton.js';
 import * as editStartButton from './buttons/editStartButton.js';
 import { logError, reportError } from './errorReporter.js';
 import { startHealthServer } from './health.js';
+import { handleAiMessage } from './aiMessageHandler.js';
 
 dotenv.config();
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.DirectMessages, GatewayIntentBits.MessageContent],
   partials: [Partials.Channel],
 });
 
 client.commands = new Collection();
-for (const cmd of [logCmd, balanceCmd, historyCmd, undoCmd, categoriesCmd, fileCmd, deleteCmd, editCmd]) {
+for (const cmd of [logCmd, balanceCmd, historyCmd, undoCmd, categoriesCmd, fileCmd, deleteCmd, editCmd, clearCmd]) {
   client.commands.set(cmd.data.name, cmd);
 }
 
@@ -95,6 +97,15 @@ client.on('interactionCreate', async (interaction) => {
     } catch (replyErr) {
       await reportError(client, 'interaction error-reply failed', replyErr);
     }
+  }
+});
+
+client.on('messageCreate', async (message) => {
+  if (message.author.bot) return;
+  try {
+    await handleAiMessage(message);
+  } catch (err) {
+    logError('messageCreate', err);
   }
 });
 

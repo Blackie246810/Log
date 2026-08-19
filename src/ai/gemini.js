@@ -7,7 +7,10 @@ const MODEL = 'gemini-2.5-flash';
 const MAX_HISTORY_TURNS = 500;
 const MAX_TOOL_HOPS = 5;
 
-const SYSTEM_INSTRUCTION = `You are a helpful assistant embedded in a personal Discord finance-tracking bot. You answer questions about the user's own income/expense data by calling the provided tools — never guess or make up numbers, always call a tool to check. Amounts are in Indian Rupees (₹). Valid categories are: ${CATEGORIES.join(', ')}. Keep answers conversational and concise, suited for a Discord DM reply. If a question is unrelated to their finances, answer briefly and naturally without forcing a tool call.`;
+function buildSystemInstruction(botName) {
+  const identity = botName ? `You are ${botName}, ` : 'You are ';
+  return `${identity}Ameen's personal finance assistant, living in his private Discord DMs — the only AI with access to his expense/income database. Introduce yourself by name when it comes up naturally (a first hello, or if asked who you are) — no need to state it every reply. Two roles in one conversation: casual chat needs no tool call; anything touching money, spending, or balance requires calling query_data — never estimate or reuse an earlier number, always re-query fresh. Data: table logs (every transaction) and balances (running balance after each transaction, own timestamps). Amounts in ₹, always stored positive — type (income/expense) sets the sign, sum accordingly. Valid categories: ${CATEGORIES.join(', ')}. Before answering from results: confirm you selected what was actually asked (right table/filter/aggregate), recompute totals yourself rather than trusting them blindly, and re-query instead of rationalizing an answer that looks off (empty, huge, negative where impossible). State assumptions (e.g. "this month" = calendar month). For financial answers, format as a tight mini-report: headline number(s) first, a line or two of relevant context after — compact, not a wall of text. For casual chat, just talk normally. Formatting: plain Discord DM text only. Bold, italic, strikethrough, inline code, code blocks, blockquotes, and bullet/numbered lists all render fine — use them. Headers work too, but keep them rare — this is a DM, not a doc, so reserve them for when they genuinely help. Never use Markdown tables or HTML — Discord renders neither; both show up as literal pipe characters or raw tags. For tabular data (e.g. a category breakdown), build a plain-text table with space-padded alignment inside a code block instead — Discord renders code blocks in monospace and scrolls them horizontally rather than breaking the alignment, so this stays readable even for wider tables.`;
+}
 
 let defaultClient = null;
 function getDefaultClient() {
@@ -17,9 +20,24 @@ function getDefaultClient() {
   return defaultClient;
 }
 
-export async function askAi(userMessage, client = getDefaultClient()) {
+function currentDateContext() {
+  const formatter = new Intl.DateTimeFormat('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+  });
+  return `${formatter.format(new Date())} IST`;
+}
+
+export async function askAi(userMessage, botName, client = getDefaultClient()) {
   const history = await getConversationHistory();
   const contents = [...history, { role: 'user', parts: [{ text: userMessage }] }];
+  const systemInstruction = `${buildSystemInstruction(botName)} Current date/time: ${currentDateContext()}. Use this as "now" for any relative date question (today, this week, this month, yesterday, last month) — never assume or guess the date.`;
 
   let hops = 0;
   while (hops < MAX_TOOL_HOPS) {
@@ -29,7 +47,7 @@ export async function askAi(userMessage, client = getDefaultClient()) {
       model: MODEL,
       contents,
       config: {
-        systemInstruction: SYSTEM_INSTRUCTION,
+        systemInstruction,
         tools: [{ functionDeclarations: toolDeclarations }],
       },
     });
