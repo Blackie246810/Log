@@ -98,13 +98,17 @@ export async function handle(interaction) {
   for (const key of ['amount', 'cashBalance', 'cardBalance', 'total']) {
     sheet.getColumn(key).numFmt = '"₹"#,##0.00';
   }
+  const CURRENCY_KEYS = new Set(['amount', 'cashBalance', 'cardBalance', 'total']);
+  function formatCurrencyForWidth(value) {
+    return '₹' + Number(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
 
   const NOTE_MAX_WIDTH = 45;
   sheet.columns.forEach((column) => {
     let maxLength = column.header.length;
     column.eachCell({ includeEmpty: true }, (cell, rowNumber) => {
       if (rowNumber === 1) return;
-      const text = cell.numFmt ? cell.text : String(cell.value ?? '');
+      const text = CURRENCY_KEYS.has(column.key) ? formatCurrencyForWidth(cell.value) : String(cell.value ?? '');
       maxLength = Math.max(maxLength, text.length);
     });
 

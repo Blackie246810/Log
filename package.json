@@ -5,7 +5,8 @@
   "main": "src/bot.js",
   "scripts": {
     "deploy-commands": "node src/deployCommands.js",
-    "start": "node src/bot.js"
+    "start": "node src/bot.js",
+    "repair-balances": "node src/repairBalances.js"
   },
   "dependencies": {
     "discord.js": "^14.16.3",
