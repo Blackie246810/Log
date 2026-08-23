@@ -1,6 +1,6 @@
 import { ButtonBuilder, ButtonStyle, ActionRowBuilder, EmbedBuilder } from 'discord.js';
 import { getLogById } from '../db.js';
-import { CATEGORIES, PAYMENT_MODES, PAYMENT_FLOWS, matchCanonical, parseDateDDMMYYYY, formatDDMMYYYY } from '../constants.js';
+import { CATEGORIES, PAYMENT_MODES, PAYMENT_FLOWS, matchCanonical, parseDateTimeDDMMYYYY, formatDateTimeDDMMYYYY } from '../constants.js';
 import { logError } from '../errorReporter.js';
 import { setPendingEdit } from '../pendingEdits.js';
 
@@ -21,9 +21,9 @@ export async function handle(interaction) {
 
   const errorBlocks = [];
 
-  const parsedDate = parseDateDDMMYYYY(rawDate);
+  const parsedDate = parseDateTimeDDMMYYYY(rawDate);
   if (!parsedDate) {
-    errorBlocks.push(`Unexpected value for [date]\nexpected values: DD-MM-YYYY format\ngiven value: ${rawDate}`);
+    errorBlocks.push(`Unexpected value for [date]\nexpected values: DD-MM-YYYY HH:mm format (24-hour, IST)\ngiven value: ${rawDate}`);
   }
 
   const category = matchCanonical(rawCategory, CATEGORIES);
@@ -78,7 +78,7 @@ export async function handle(interaction) {
     .setColor(0x3498db)
     .setTitle(`Confirm edit — entry #${logId}`)
     .setDescription([
-      diffLine('Date', formatDDMMYYYY(new Date(original.createdAt)), formatDDMMYYYY(parsedDate)),
+      diffLine('Date', formatDateTimeDDMMYYYY(new Date(original.createdAt)), formatDateTimeDDMMYYYY(parsedDate)),
       diffLine('Category', original.category, category),
       diffLine('Amount', `₹${Number(original.amount).toFixed(2)}`, `₹${amountNum.toFixed(2)}`),
       diffLine('Payment mode', original.paymentMode, paymentMode),

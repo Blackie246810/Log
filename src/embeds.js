@@ -1,25 +1,5 @@
 import { EmbedBuilder } from 'discord.js';
 
-const EMBED_FIELD_NAME_LIMIT = 256;
-const EMBED_FIELD_VALUE_LIMIT = 1024;
-const EMBED_MAX_FIELDS = 25;
-
-export function buildTableEmbed({ title, rows } = {}) {
-  if (!Array.isArray(rows) || rows.length === 0) return null;
-
-  const embed = new EmbedBuilder().setColor(0x5865f2);
-  if (title) embed.setTitle(String(title).slice(0, 256));
-
-  const fields = rows.slice(0, EMBED_MAX_FIELDS).map((row) => ({
-    name: String(row?.label ?? '—').slice(0, EMBED_FIELD_NAME_LIMIT) || '—',
-    value: String(row?.value ?? '—').slice(0, EMBED_FIELD_VALUE_LIMIT) || '—',
-    inline: true,
-  }));
-
-  embed.addFields(fields);
-  return embed;
-}
-
 export function buildLogEmbed(log, balance) {
   const sign = log.type === 'income' ? '+' : '-';
   const embed = new EmbedBuilder()

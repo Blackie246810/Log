@@ -83,7 +83,7 @@ export async function handle(interaction) {
 
   for (const r of rows) {
     sheet.addRow({
-      date: new Date(r.createdAt).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }),
+      date: new Date(r.createdAt).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Kolkata' }),
       type: r.type,
       category: r.category,
       paymentMode: r.paymentMode,

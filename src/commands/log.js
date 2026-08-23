@@ -1,5 +1,5 @@
 import { SlashCommandBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder, InteractionContextType } from 'discord.js';
-import { todayDDMMYYYY } from '../constants.js';
+import { nowDateTimeDDMMYYYY } from '../constants.js';
 
 export const data = new SlashCommandBuilder()
   .setName('log')
@@ -11,9 +11,10 @@ export async function execute(interaction) {
 
   const dateInput = new TextInputBuilder()
     .setCustomId('date')
-    .setLabel('Date (DD-MM-YYYY)')
+    .setLabel('Date & Time (DD-MM-YYYY HH:MM, 24H Format)')
     .setStyle(TextInputStyle.Short)
-    .setValue(todayDDMMYYYY())
+    .setPlaceholder('e.g. 22-08-2026 14:30')
+    .setValue(nowDateTimeDDMMYYYY())
     .setRequired(true);
 
   const categoryInput = new TextInputBuilder()

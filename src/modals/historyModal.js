@@ -29,7 +29,7 @@ export async function handle(interaction) {
 
     const lines = rows.map((r) => {
       const sign = r.type === 'income' ? '+' : '-';
-      const date = new Date(r.createdAt).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
+      const date = new Date(r.createdAt).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Kolkata' });
       const note = r.note ? ` — ${r.note}` : '';
       return `\`#${r.id}\` ${sign}₹${Number(r.amount).toFixed(2)} · ${r.category} · ${r.paymentMode} · ${date}${note}`;
     });

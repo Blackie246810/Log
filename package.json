@@ -9,10 +9,11 @@
     "repair-balances": "node src/repairBalances.js"
   },
   "dependencies": {
+    "@google/genai": "^2.16.0",
+    "@napi-rs/canvas": "^1.0.7",
     "discord.js": "^14.16.3",
     "dotenv": "^16.4.5",
-    "pg": "^8.13.1",
     "exceljs": "^4.4.0",
-    "@google/genai": "^2.16.0"
+    "pg": "^8.13.1"
   }
 }

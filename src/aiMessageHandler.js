@@ -1,23 +1,28 @@
+import { AttachmentBuilder } from 'discord.js';
 import { askAi } from './ai/gemini.js';
 import { logError } from './errorReporter.js';
-import { buildTableEmbed } from './embeds.js';
+import { renderTableImages, MAX_TABLES_PER_MESSAGE } from './tableImage.js';
 
 const DISCORD_MESSAGE_LIMIT = 2000;
 const TYPING_REFRESH_MS = 8000;
 const TABLE_BLOCK_RE = /```table\s*\n([\s\S]*?)\n```/gi;
-const DISCORD_MAX_EMBEDS_PER_MESSAGE = 10;
 
-function extractTableBlocks(text) {
+function extractTableImages(text) {
   TABLE_BLOCK_RE.lastIndex = 0;
-  const embeds = [];
+  const attachments = [];
 
+  // No cap here on purpose: a genuinely large result set is meant to span
+  // as many images/messages as it needs (see ai/gemini.js) rather than
+  // being cut off at some arbitrary count.
   for (const match of text.matchAll(TABLE_BLOCK_RE)) {
     try {
       const parsed = JSON.parse(match[1]);
-      const embed = buildTableEmbed(parsed);
-      if (embed) embeds.push(embed);
+      const buffers = renderTableImages(parsed); // may expand one block into several images
+      buffers.forEach((buffer) => {
+        attachments.push(new AttachmentBuilder(buffer, { name: `table_${attachments.length + 1}.png` }));
+      });
     } catch (err) {
-      logError('extractTableBlocks: malformed table JSON', err);
+      logError('extractTableImages: malformed table JSON', err);
     }
   }
 
@@ -26,7 +31,18 @@ function extractTableBlocks(text) {
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 
-  return { embeds: embeds.slice(0, DISCORD_MAX_EMBEDS_PER_MESSAGE), remainingText };
+  return { attachments, remainingText };
+}
+
+// Discord allows at most MAX_TABLES_PER_MESSAGE attachments per message —
+// a bigger result set means more messages, not more attachments crammed
+// into one. Splits the flat attachment list into legal-sized chunks.
+function chunkAttachments(attachments) {
+  const chunks = [];
+  for (let i = 0; i < attachments.length; i += MAX_TABLES_PER_MESSAGE) {
+    chunks.push(attachments.slice(i, i + MAX_TABLES_PER_MESSAGE));
+  }
+  return chunks;
 }
 
 export async function handleAiMessage(message) {
@@ -52,14 +68,27 @@ export async function handleAiMessage(message) {
 
   try {
     const reply = await askAi(text, message.client.user.username);
-    const { embeds, remainingText } = extractTableBlocks(reply);
+    const { attachments, remainingText } = extractTableImages(reply);
+    const chunks = chunkAttachments(attachments);
 
-    const payload = {};
-    if (remainingText) payload.content = remainingText.slice(0, DISCORD_MESSAGE_LIMIT);
-    if (embeds.length > 0) payload.embeds = embeds;
-    if (!payload.content && !payload.embeds) payload.content = "Here's what I found.";
+    // First chunk (or plain text, if there were no tables at all) replaces
+    // the "Thinking..." placeholder. Any further chunks are genuinely
+    // separate Discord messages, sent right after — Discord's own 10-file
+    // limit means this is the only way to deliver more than 10 table
+    // images for one reply.
+    const firstPayload = {};
+    if (remainingText) firstPayload.content = remainingText.slice(0, DISCORD_MESSAGE_LIMIT);
+    if (chunks[0]) firstPayload.files = chunks[0];
+    if (!firstPayload.content && !firstPayload.files) firstPayload.content = "Here's what I found.";
 
-    await placeholder.edit(payload);
+    await placeholder.edit(firstPayload);
+
+    for (let i = 1; i < chunks.length; i++) {
+      await message.channel.send({
+        content: `-# continued (${i + 1}/${chunks.length})`,
+        files: chunks[i],
+      });
+    }
   } catch (err) {
     logError('ai message handler', err);
     await placeholder.edit('Something went wrong asking the AI. Check the console for details.');

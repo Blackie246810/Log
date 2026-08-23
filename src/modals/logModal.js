@@ -1,6 +1,6 @@
 import { ButtonBuilder, ButtonStyle, ActionRowBuilder } from 'discord.js';
 import { addLogEntry } from '../db.js';
-import { CATEGORIES, PAYMENT_MODES, PAYMENT_FLOWS, matchCanonical, parseDateDDMMYYYY } from '../constants.js';
+import { CATEGORIES, PAYMENT_MODES, PAYMENT_FLOWS, matchCanonical, parseDateTimeDDMMYYYY } from '../constants.js';
 import { buildLogEmbed } from '../embeds.js';
 import { logError } from '../errorReporter.js';
 
@@ -15,10 +15,10 @@ export async function handle(interaction) {
 
   const errorBlocks = [];
 
-  const parsedDate = parseDateDDMMYYYY(rawDate);
+  const parsedDate = parseDateTimeDDMMYYYY(rawDate);
   if (!parsedDate) {
     errorBlocks.push(
-      `Unexpected value for [date]\nexpected values: DD-MM-YYYY format\ngiven value: ${rawDate}`
+      `Unexpected value for [date]\nexpected values: DD-MM-YYYY HH:mm format (24-hour, IST)\ngiven value: ${rawDate}`
     );
   }
 

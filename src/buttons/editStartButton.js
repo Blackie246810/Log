@@ -1,6 +1,6 @@
 import { ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder } from 'discord.js';
 import { getLogById } from '../db.js';
-import { formatDDMMYYYY } from '../constants.js';
+import { formatDateTimeDDMMYYYY } from '../constants.js';
 import { logError } from '../errorReporter.js';
 
 export const customIdPrefix = 'edit-start:';
@@ -36,8 +36,9 @@ export async function handle(interaction) {
     .setTitle(`Edit entry #${log.id}`);
 
   const dateInput = new TextInputBuilder()
-    .setCustomId('date').setLabel('Date (DD-MM-YYYY)').setStyle(TextInputStyle.Short)
-    .setValue(formatDDMMYYYY(new Date(log.createdAt))).setRequired(true);
+    .setCustomId('date').setLabel('Date & Time (DD-MM-YYYY HH:MM, 24H Format)').setStyle(TextInputStyle.Short)
+    .setPlaceholder('e.g. 22-08-2026 14:30')
+    .setValue(formatDateTimeDDMMYYYY(new Date(log.createdAt))).setRequired(true);
 
   const categoryInput = new TextInputBuilder()
     .setCustomId('category').setLabel('Category').setStyle(TextInputStyle.Short)
