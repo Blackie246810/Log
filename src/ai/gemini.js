@@ -36,7 +36,11 @@ function buildSystemInstruction(botName) {
     `Table images are sized to fit their content well, not a fixed row/column count — long header or cell text wraps onto more lines rather than ever getting cut off, and a table that ends up too wide or too tall for one comfortable "glance at it" image is automatically split by the system into more images. You can't calculate the exact pixel size something will render at, so don't try to hit an exact number — instead, use judgement to make the split itself readable: if a dataset has many attributes, consider grouping related columns into logically separate tables with their own titles (e.g. "core details" vs "amounts/balances"), the same way you'd design separate report sections, rather than always emitting one wide table and leaving the grouping to chance. If a result has a lot of rows, splitting it into consecutive "<title> — part 1 of N", "part 2 of N", ... table blocks is usually clearer than one huge block. You don't have to get either of these exactly right — the system guarantees every row and column shows up somewhere, splitting further on its own if your grouping still doesn't fit.`,
 
     `There is no limit on how much data you can present this way — a genuinely large result can span many table images across as many Discord messages as it needs (up to ${MAX_TABLES_PER_MESSAGE} images per message, a Discord platform limit, then automatically continuing into a further message), and that's completely fine. That said, use reasonable judgement: if a smaller, well-scoped answer would serve the user just as well, prefer that — this is a preference, not a rule, and it should never cause you to omit or shrink data that was actually asked for.`,
-  
+
+    `File uploads: the user can attach a file directly to their DM message — a receipt photo, a bank/PDF statement, a spreadsheet or CSV export, a screenshot, a short audio note, etc. — and you'll receive it inline along with their text. Read/analyze it directly (OCR the receipt, summarize the statement, describe the image) and answer as if you'd been shown it. You still cannot write anything to the database yourself — if the user wants a value from the file logged, tell them what to type into /log rather than claiming to have logged it. If a message says an attachment was skipped, briefly say so and why (too large, unsupported type, or too many files) rather than silently ignoring it.`,
+
+    `Sending files back: when the user wants an actual downloadable file rather than chat text or a table image — e.g. "export this as a CSV", "give me a text file of that" — emit a fenced code block tagged exactly file containing JSON in this shape: {"filename": "spending-august.csv", "mime_type": "text/csv", "encoding": "text", "content": "Date,Category,Amount\\n22-08-2026,Food/Drink,USD 450.00"}. Use "encoding": "text" for plain text content (CSV, Markdown, JSON, plain reports) and "encoding": "base64" only if you genuinely need to send binary data already encoded that way. Keep it well under a few MB — this is for small, genuinely file-shaped output, not a substitute for the table-image or normal text formats above. Put any surrounding sentence(s) as normal text outside the block, same as with table blocks.`,
+
     `Ensure accuracy, precision and validity when presenting and talking about the financial data - that is the most important part of you`
   ].join('\n\n');
 }
@@ -64,9 +68,30 @@ function currentDateContext() {
   return `${formatter.format(new Date())} (${timezone})`;
 }
 
-export async function askAi(userMessage, botName, client = getDefaultClient()) {
+// Attachments are sent to Gemini as raw inlineData (base64) so the model
+// can actually see them, but keeping that base64 around forever would be
+// wasteful (and eventually huge) once it's persisted to conversation
+// history and re-sent on every future turn. Once this turn is answered,
+// each inlineData part is swapped for a small text placeholder that
+// preserves "a file was attached here" context without the bytes.
+function sanitizeUserPartsForHistory(parts, attachmentMeta) {
+  let metaIndex = 0;
+  return parts.map((part) => {
+    if (!part.inlineData) return part;
+    const meta = attachmentMeta[metaIndex++];
+    const label = meta ? `${meta.name} (${meta.mimeType})` : part.inlineData.mimeType;
+    return { text: `[Attached file: ${label} — content analyzed in this turn, original file not retained]` };
+  });
+}
+
+export async function askAi(userMessage, botName, client = getDefaultClient(), attachmentParts = [], attachmentMeta = []) {
   const history = await getConversationHistory();
-  const contents = [...history, { role: 'user', parts: [{ text: userMessage }] }];
+
+  const userParts = [];
+  if (userMessage) userParts.push({ text: userMessage });
+  userParts.push(...attachmentParts);
+
+  const contents = [...history, { role: 'user', parts: userParts }];
   const systemInstruction = `${buildSystemInstruction(botName)} Current date/time: ${currentDateContext()}. Use this as "now" for any relative date question (today, this week, this month, yesterday, last month) — never assume or guess the date.`;
 
   let hops = 0;
@@ -86,7 +111,8 @@ export async function askAi(userMessage, botName, client = getDefaultClient()) {
     const calls = response.functionCalls;
     if (!calls || calls.length === 0) {
       const text = response.text ?? "I'm not sure how to answer that.";
-      const leanHistory = [...history, { role: 'user', parts: [{ text: userMessage }] }, { role: 'model', parts: [{ text }] }];
+      const sanitizedUserParts = sanitizeUserPartsForHistory(userParts, attachmentMeta);
+      const leanHistory = [...history, { role: 'user', parts: sanitizedUserParts }, { role: 'model', parts: [{ text }] }];
       await saveHistory(leanHistory);
       return text;
     }
