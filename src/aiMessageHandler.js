@@ -45,6 +45,25 @@ function chunkAttachments(attachments) {
   return chunks;
 }
 
+// Discord rejects any message over DISCORD_MESSAGE_LIMIT characters — a
+// reply that runs longer than that is meant to continue as further
+// messages, not get cut off. Splits on the last newline within the limit,
+// falling back to the last space, so we never break mid-word/mid-sentence
+// unless a single "word" itself exceeds the limit.
+function splitTextIntoChunks(text, limit = DISCORD_MESSAGE_LIMIT) {
+  const chunks = [];
+  let remaining = text;
+  while (remaining.length > limit) {
+    let splitAt = remaining.lastIndexOf('\n', limit);
+    if (splitAt <= 0) splitAt = remaining.lastIndexOf(' ', limit);
+    if (splitAt <= 0) splitAt = limit;
+    chunks.push(remaining.slice(0, splitAt).trimEnd());
+    remaining = remaining.slice(splitAt).trimStart();
+  }
+  if (remaining) chunks.push(remaining);
+  return chunks;
+}
+
 export async function handleAiMessage(message) {
   if (message.author.bot) return;
   if (message.author.id !== process.env.DISCORD_OWNER_ID) return;
@@ -69,24 +88,29 @@ export async function handleAiMessage(message) {
   try {
     const reply = await askAi(text, message.client.user.username);
     const { attachments, remainingText } = extractTableImages(reply);
-    const chunks = chunkAttachments(attachments);
+    const textChunks = splitTextIntoChunks(remainingText, DISCORD_MESSAGE_LIMIT);
+    const attachmentChunks = chunkAttachments(attachments);
 
-    // First chunk (or plain text, if there were no tables at all) replaces
-    // the "Thinking..." placeholder. Any further chunks are genuinely
-    // separate Discord messages, sent right after — Discord's own 10-file
-    // limit means this is the only way to deliver more than 10 table
-    // images for one reply.
+    // First chunk of text (and/or the first batch of table images, if there
+    // were any) replaces the "Thinking..." placeholder. Any further text or
+    // attachment chunks are genuinely separate Discord messages, sent right
+    // after — this is what lets a long reply keep going instead of getting
+    // cut off, and lets more than 10 table images ship for one reply.
     const firstPayload = {};
-    if (remainingText) firstPayload.content = remainingText.slice(0, DISCORD_MESSAGE_LIMIT);
-    if (chunks[0]) firstPayload.files = chunks[0];
+    if (textChunks[0]) firstPayload.content = textChunks[0];
+    if (attachmentChunks[0]) firstPayload.files = attachmentChunks[0];
     if (!firstPayload.content && !firstPayload.files) firstPayload.content = "Here's what I found.";
 
     await placeholder.edit(firstPayload);
 
-    for (let i = 1; i < chunks.length; i++) {
+    for (let i = 1; i < textChunks.length; i++) {
+      await message.channel.send({ content: textChunks[i] });
+    }
+
+    for (let i = 1; i < attachmentChunks.length; i++) {
       await message.channel.send({
-        content: `-# continued (${i + 1}/${chunks.length})`,
-        files: chunks[i],
+        content: `-# continued (${i + 1}/${attachmentChunks.length})`,
+        files: attachmentChunks[i],
       });
     }
   } catch (err) {
