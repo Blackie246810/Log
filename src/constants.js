@@ -1,7 +1,7 @@
 export const CATEGORIES = [
   'Food/Drink', 'Travel', 'Stationary/Grocery', 'Income', 'Exchange',
-  'Laundry', 'Recharge', 'Other services', 'Interpersonal transactions',
-  'Fees', 'Assignment', 'Salary',
+  'Laundry', 'Recharge/Subscription', 'Other service', 'Interpersonal transaction',
+  'Fee', 'Assignment', 'Salary', 'Medical',
 ];
 
 export const PAYMENT_MODES = ['Physical', 'Digital'];

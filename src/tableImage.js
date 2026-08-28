@@ -40,22 +40,8 @@ GlobalFonts.registerFromPath(FONT_PATH, FONT_FAMILY);
 // (growing that row's height) rather than getting truncated with an
 // ellipsis, and anything that still doesn't fit one comfortable image gets
 // pushed into more images automatically.
-//
-// MAX_TABLE_WIDTH is deliberately sized for a phone screen, not a desktop
-// window. Discord doesn't publish an exact mobile content-column width,
-// but typical phone viewports run ~360-430 CSS px, and Discord's own
-// avatar gutter + padding eats roughly 50-70px of that — leaving a
-// realistic content column around 300-360px on most devices. 700px (a
-// reasonable desktop target) would need to be scaled down by roughly half
-// on a phone, visibly shrinking the text; 340px displays close to native
-// size on most phones and only mildly shrinks on the smallest ones. This
-// does mean more tables split than a desktop-only design would need — that
-// tradeoff is intentional: a "glance at it" image that's actually legible
-// on the device it's most likely read on beats a wider image that always
-// needs pinch-zooming.
-export const MAX_TABLE_WIDTH = 420; // target total image width, logical px
+export const MAX_TABLE_WIDTH = 700; // target total image width, logical px
 export const MAX_TABLE_HEIGHT = 480; // target total image height, logical px
-export const MAX_COL_CONTENT_WIDTH = 110; // per-column cap before content wraps, logical px
 
 // Discord hard-caps attachments at 10 files per message — this isn't a
 // design choice, it's the platform's actual limit. A result set needing
@@ -69,7 +55,7 @@ const TITLE_H = 36;
 const LINE_H = 19; // one wrapped line of text, any font size used here
 const HEADER_V_PAD = 21; // header row = LINE_H + this per line-of-text, single line = 40 (matches prior fixed HEADER_H)
 const ROW_V_PAD = 15; // data row = LINE_H + this per line-of-text, single line = 34 (matches prior fixed ROW_H)
-const MIN_COL_W = 60;
+const MIN_COL_W = 70; // floor width for any column, including padding — below this a column stops being legible
 
 // Discord's own dark-theme palette (Blurple's dark surface colors), so the
 // image blends into the chat instead of looking like a pasted-in screenshot
@@ -159,16 +145,76 @@ function wrapText(ctx, text, maxWidth) {
   return lines.length ? lines : [''];
 }
 
+// Smart width allocation ("water-filling"): every column gets its natural
+// content width (floored at MIN_COL_W) as long as the total fits the
+// budget — nothing is capped just because one fixed ceiling says so. Only
+// once the combined total exceeds budget does anything shrink, and even
+// then a column keeps its full request until the group of columns still
+// asking for more is squeezed down to an equal share of what's left. A
+// column that only wanted a little is left almost untouched; a column
+// that wanted a lot gives up the most, since it has the most slack to
+// still stay legible via wrapping. This is the standard max-min fair-share
+// algorithm (the same idea used for splitting bandwidth fairly).
+function waterFillWidths(desired, budget) {
+  const n = desired.length;
+  if (n === 0) return [];
+  const total = desired.reduce((a, b) => a + b, 0);
+  if (total <= budget) return desired.slice();
+
+  const order = desired.map((_, i) => i).sort((a, b) => desired[a] - desired[b]);
+  const result = new Array(n).fill(0);
+  let remaining = budget;
+  let remainingCount = n;
+  for (let k = 0; k < n; k++) {
+    const idx = order[k];
+    const fairShare = remaining / remainingCount;
+    if (desired[idx] <= fairShare) {
+      result[idx] = desired[idx];
+      remaining -= desired[idx];
+      remainingCount -= 1;
+    } else {
+      // This column, and every later one in the (ascending) sort order,
+      // wants at least as much as this one — none of them can be fully
+      // satisfied, so they split what's left equally.
+      const share = remaining / remainingCount;
+      for (let j = k; j < n; j++) result[order[j]] = share;
+      break;
+    }
+  }
+  return result;
+}
+
+// Proportionally scales a set of column widths UP to fill exactly
+// targetWidth, in proportion to each column's current width — used so a
+// table that has room to spare distributes the extra space across all its
+// columns rather than leaving it as dead space at one edge. Never shrinks;
+// if the widths already meet or exceed targetWidth, they're returned as-is.
+function growToFill(widths, targetWidth) {
+  const total = widths.reduce((a, b) => a + b, 0);
+  if (total <= 0 || total >= targetWidth) return widths;
+  const scale = targetWidth / total;
+  return widths.map((w) => w * scale);
+}
+
 /**
  * Renders one table as a PNG buffer, at whatever size it takes to show
- * every column and row in full — no count-based limit here. Callers that
- * can't guarantee the result stays a comfortable size should use
- * renderTableImages() instead, which measures content first and splits
- * into multiple appropriately-sized images.
- * @param {{ title?: string, columns: string[], rows: Array<Array<string|number>> }} table
+ * every column and row in full — no count-based limit here. Column widths
+ * are smart-allocated (see waterFillWidths) against MAX_TABLE_WIDTH by
+ * default: a column that needs little space doesn't waste it, a column
+ * that needs more gets what the others don't need, and only if everyone
+ * combined still doesn't fit does anything actually compress.
+ *
+ * `columnWidths`, if passed, is used verbatim instead — this is how
+ * renderTableImages() enforces one consistent width across every image in
+ * a multi-image split (see there for why). Most callers should omit it.
+ *
+ * Callers that can't guarantee a single image stays a comfortable overall
+ * size should use renderTableImages() instead, which measures content
+ * first and splits into multiple appropriately-sized images.
+ * @param {{ title?: string, columns: string[], rows: Array<Array<string|number>>, columnWidths?: number[] }} table
  * @returns {Buffer}
  */
-export function renderTableImage({ title, columns, rows } = {}) {
+export function renderTableImage({ title, columns, rows, columnWidths } = {}) {
   if (!Array.isArray(columns) || columns.length === 0) {
     throw new Error('renderTableImage: "columns" must be a non-empty array');
   }
@@ -187,21 +233,31 @@ export function renderTableImage({ title, columns, rows } = {}) {
   // canvas size — which itself depends on the measured column widths.
   const measure = createCanvas(10, 10).getContext('2d');
 
-  const numericCol = normalizedColumns.map((_, i) => normalizedRows.every((r) => looksNumeric(r[i])));
-
-  // Natural (single-line) width per column, capped at MAX_COL_CONTENT_WIDTH
-  // — content longer than that wraps onto more lines instead of stretching
-  // the column indefinitely.
-  measure.font = `bold 15px "${FONT_FAMILY}"`;
-  const colWidths = normalizedColumns.map((c) => measure.measureText(c).width);
-  measure.font = '14px "' + FONT_FAMILY + '"';
-  normalizedRows.forEach((row) => {
-    row.forEach((cell, i) => {
-      const w = measure.measureText(cell).width;
-      if (w > colWidths[i]) colWidths[i] = w;
-    });
+  // A column counts as numeric if every NON-BLANK cell in it looks
+  // numeric — a single blank/pending entry (no value yet) shouldn't knock
+  // an otherwise all-numeric column out of right-alignment. An entirely
+  // blank column has nothing to judge by, so it's left-aligned like text.
+  const numericCol = normalizedColumns.map((_, i) => {
+    const nonBlank = normalizedRows.map((r) => r[i]).filter((v) => String(v ?? '').trim() !== '');
+    return nonBlank.length > 0 && nonBlank.every((v) => looksNumeric(v));
   });
-  const finalColWidths = colWidths.map((w) => Math.min(MAX_COL_CONTENT_WIDTH, Math.max(MIN_COL_W, w + PAD_X * 2)));
+
+  let finalColWidths;
+  if (Array.isArray(columnWidths)) {
+    finalColWidths = columnWidths;
+  } else {
+    measure.font = `bold 15px "${FONT_FAMILY}"`;
+    const rawWidths = normalizedColumns.map((c) => measure.measureText(c).width);
+    measure.font = '14px "' + FONT_FAMILY + '"';
+    normalizedRows.forEach((row) => {
+      row.forEach((cell, i) => {
+        const w = measure.measureText(cell).width;
+        if (w > rawWidths[i]) rawWidths[i] = w;
+      });
+    });
+    const desired = rawWidths.map((w) => Math.max(MIN_COL_W, w + PAD_X * 2));
+    finalColWidths = waterFillWidths(desired, MAX_TABLE_WIDTH);
+  }
 
   let tableWidth = finalColWidths.reduce((a, b) => a + b, 0);
   // A narrow table (few columns, e.g. one column-group of a wide-table
@@ -214,8 +270,8 @@ export function renderTableImage({ title, columns, rows } = {}) {
     tableWidth = Math.max(tableWidth, titleWidth);
   }
 
-  // Wrap the header and every cell against the FINAL (post-cap) column
-  // widths, so we know each row's real height before drawing anything.
+  // Wrap the header and every cell against the FINAL column widths, so we
+  // know each row's real height before drawing anything.
   measure.font = `bold 15px "${FONT_FAMILY}"`;
   let headerLines = 1;
   const wrappedHeader = normalizedColumns.map((c, i) => {
@@ -315,9 +371,24 @@ export function renderTableImage({ title, columns, rows } = {}) {
  * column or row is ever silently dropped regardless of what the AI sends,
  * and regardless of how long any individual header or cell's content is.
  *
- * Columns are bucketed left to right by cumulative rendered width; rows are
- * then bucketed (independently, per column group) by cumulative rendered
- * height, since a row's height depends on which columns are next to it.
+ * Two things this specifically fixes over a naive per-column cap:
+ *
+ * 1. Smart allocation: columns are sized with waterFillWidths (see above),
+ *    so a column that needs little width doesn't waste it and a column
+ *    that needs more gets what the others didn't need, rather than every
+ *    column being squeezed to the same fixed ceiling regardless of need.
+ *
+ * 2. Consistent sizing across a split: when the data needs more than one
+ *    column-group (e.g. a "core details" table and an "amounts" table),
+ *    later groups with less content would otherwise render narrower than
+ *    earlier ones — which makes Discord display them at different
+ *    effective zoom/scale, a jarring size change scrolling through what's
+ *    meant to be one connected result. When there's more than one column-
+ *    group, every group's columns are grown (via growToFill) to the same
+ *    shared width, so the whole sequence reads as one consistent report.
+ *    A single column-group's own row-parts already share identical column
+ *    widths by construction, so this only matters across groups.
+ *
  * There is no cap on the number of resulting images — a genuinely large
  * dataset just produces as many as it needs.
  *
@@ -335,53 +406,47 @@ export function renderTableImages({ title, columns, rows } = {}) {
   const normalizedColumns = columns.map((c) => String(c ?? ''));
   const measure = createCanvas(10, 10).getContext('2d');
 
-  // Natural (single-line, capped) width per column — same measurement
-  // renderTableImage itself would derive, computed here up front so we can
-  // decide how to bucket columns before rendering anything.
+  // Natural (floor-respecting, uncompressed) desired width per column.
   measure.font = `bold 15px "${FONT_FAMILY}"`;
   const headerWidths = normalizedColumns.map((c) => measure.measureText(c).width);
   measure.font = '14px "' + FONT_FAMILY + '"';
-  const naturalColWidths = normalizedColumns.map((c, i) => {
+  const desiredColWidths = normalizedColumns.map((c, i) => {
     let w = headerWidths[i];
     rows.forEach((row) => {
       const cellW = measure.measureText(String(Array.isArray(row) ? row[i] ?? '' : '')).width;
       if (cellW > w) w = cellW;
     });
-    return w;
+    return Math.max(MIN_COL_W, w + PAD_X * 2);
   });
-  const finalColWidths = naturalColWidths.map((w) => Math.min(MAX_COL_CONTENT_WIDTH, Math.max(MIN_COL_W, w + PAD_X * 2)));
 
-  // Bucket columns left-to-right by cumulative width. MAX_COL_CONTENT_WIDTH
-  // is always well under MAX_TABLE_WIDTH, so a group always gets at least
-  // one column before overflowing.
+  // Every desired width is already >= MIN_COL_W, so a group of k columns
+  // always sums to >= k * MIN_COL_W — meaning water-filling can only
+  // guarantee every column at least the floor if k <= MAX_TABLE_WIDTH /
+  // MIN_COL_W. That bound is exact regardless of content, so bucketing by
+  // this fixed count is equivalent to "keep adding columns as long as
+  // fair allocation can still keep everyone legible."
+  const maxColsPerGroup = Math.max(1, Math.floor(MAX_TABLE_WIDTH / MIN_COL_W));
   const columnGroups = [];
-  {
-    let indices = [];
-    let width = 0;
-    normalizedColumns.forEach((_, i) => {
-      const w = finalColWidths[i];
-      if (indices.length > 0 && width + w > MAX_TABLE_WIDTH) {
-        columnGroups.push(indices);
-        indices = [];
-        width = 0;
-      }
-      indices.push(i);
-      width += w;
-    });
-    if (indices.length > 0) columnGroups.push(indices);
+  for (let i = 0; i < normalizedColumns.length; i += maxColsPerGroup) {
+    const indices = [];
+    for (let j = i; j < Math.min(i + maxColsPerGroup, normalizedColumns.length); j++) indices.push(j);
+    columnGroups.push(indices);
   }
 
-  const buffers = [];
-  const titleHGuess = title ? TITLE_H : 0;
-
-  columnGroups.forEach((colIndices, colGroupIdx) => {
+  // Phase 1: for each column group, water-fill its own desired widths
+  // against the budget (its "tight" width — compressed only if it has to
+  // be) and use that to decide row-chunk boundaries. Wider (stretched)
+  // columns can only wrap LESS than this estimate, so using the tight
+  // width here is a safe, conservative basis for where to break rows.
+  const groups = columnGroups.map((colIndices, colGroupIdx) => {
+    const groupDesired = colIndices.map((i) => desiredColWidths[i]);
+    const tightWidths = waterFillWidths(groupDesired, MAX_TABLE_WIDTH);
     const groupColumns = colIndices.map((i) => normalizedColumns[i]);
-    const groupColWidths = colIndices.map((i) => finalColWidths[i]);
 
     measure.font = `bold 15px "${FONT_FAMILY}"`;
     let headerLines = 1;
     groupColumns.forEach((c, j) => {
-      const lines = wrapText(measure, c, groupColWidths[j] - PAD_X * 2).length;
+      const lines = wrapText(measure, c, tightWidths[j] - PAD_X * 2).length;
       if (lines > headerLines) headerLines = lines;
     });
     const headerHeight = headerLines * LINE_H + HEADER_V_PAD;
@@ -391,17 +456,13 @@ export function renderTableImages({ title, columns, rows } = {}) {
       let lines = 1;
       colIndices.forEach((i, j) => {
         const cellText = String(Array.isArray(row) ? row[i] ?? '' : '');
-        const cellLines = wrapText(measure, cellText, groupColWidths[j] - PAD_X * 2).length;
+        const cellLines = wrapText(measure, cellText, tightWidths[j] - PAD_X * 2).length;
         if (cellLines > lines) lines = cellLines;
       });
       return lines * LINE_H + ROW_V_PAD;
     });
 
-    // Bucket rows into height-based chunks against a target image height
-    // budget. A single row taller than the whole budget on its own (e.g.
-    // one cell with a huge amount of wrapped text) still gets its own
-    // image rather than being cut mid-row — occasionally exceeding the
-    // target height is the honest tradeoff for never truncating content.
+    const titleHGuess = title ? TITLE_H : 0;
     const budget = Math.max(1, MAX_TABLE_HEIGHT - titleHGuess - headerHeight);
     const rowChunks = [];
     {
@@ -420,19 +481,37 @@ export function renderTableImages({ title, columns, rows } = {}) {
       if (idxs.length > 0 || rows.length === 0) rowChunks.push(idxs);
     }
 
+    return { colIndices, groupColumns, tightWidths, rowChunks };
+  });
+
+  // Phase 2: decide the shared render width. Only matters when there's
+  // more than one column-group — a single group's row-parts already
+  // share identical widths by construction, so forcing them to the full
+  // budget would just needlessly puff up an otherwise-compact small table.
+  const shouldMatchWidth = groups.length > 1;
+  const buffers = [];
+
+  groups.forEach(({ colIndices, groupColumns, tightWidths, rowChunks }, colGroupIdx) => {
+    const renderWidths = shouldMatchWidth ? growToFill(tightWidths, MAX_TABLE_WIDTH) : tightWidths;
+
     rowChunks.forEach((rowIdxs, rowChunkIdx) => {
       const groupRows = rowIdxs.map((rIdx) =>
         colIndices.map((i) => (Array.isArray(rows[rIdx]) ? rows[rIdx][i] ?? '' : ''))
       );
 
       const labelParts = [];
-      if (columnGroups.length > 1) labelParts.push(`fields ${colGroupIdx + 1}/${columnGroups.length}`);
+      if (groups.length > 1) labelParts.push(`fields ${colGroupIdx + 1}/${groups.length}`);
       if (rowChunks.length > 1) labelParts.push(`part ${rowChunkIdx + 1}/${rowChunks.length}`);
       const groupTitle = labelParts.length === 0
         ? title
         : title ? `${title} — ${labelParts.join(', ')}` : labelParts.join(', ');
 
-      buffers.push(renderTableImage({ title: groupTitle, columns: groupColumns, rows: groupRows }));
+      buffers.push(renderTableImage({
+        title: groupTitle,
+        columns: groupColumns,
+        rows: groupRows,
+        columnWidths: renderWidths,
+      }));
     });
   });
 
