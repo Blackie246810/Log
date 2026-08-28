@@ -14,20 +14,48 @@ export const pool = new Pool({
   ssl: { rejectUnauthorized: false },
 });
 
+// ---------------------------------------------------------------------------
+// Constants (Currency / Timezone) — single row, mirrors the Conversations
+// table's Id-fixed-at-1 pattern. constantsStore.js is the in-memory cache
+// that everything else actually reads; these are its only DB touchpoints.
+// ---------------------------------------------------------------------------
+
+export async function getConstantsRow() {
+  const { rows } = await pool.query(`SELECT "Currency" AS "currency", "Timezone" AS "timezone" FROM "Constants" WHERE "Id" = 1`);
+  return rows[0] ?? null;
+}
+
+export async function updateCurrencyRow(currency) {
+  await pool.query(
+    `INSERT INTO "Constants" ("Id", "Currency", "Timezone") VALUES (1, $1, 'Asia/Kolkata')
+     ON CONFLICT ("Id") DO UPDATE SET "Currency" = EXCLUDED."Currency"`,
+    [currency]
+  );
+}
+
+export async function updateTimezoneRow(timezone) {
+  await pool.query(
+    `INSERT INTO "Constants" ("Id", "Currency", "Timezone") VALUES (1, 'INR', $1)
+     ON CONFLICT ("Id") DO UPDATE SET "Timezone" = EXCLUDED."Timezone"`,
+    [timezone]
+  );
+}
+
 async function getLatestBalance(client) {
   const { rows } = await client.query(
-    `SELECT b."Cash balance" AS "cashBalance", b."Card balance" AS "cardBalance", b."Total" AS "total"
+    `SELECT b."Cash balance" AS "cashBalance", b."Card balance" AS "cardBalance", b."Total" AS "total", b."Currency" AS "currency"
      FROM "Balances" b
      JOIN "Logs" l ON b."Log id" = l."Id"
      ORDER BY l."Created at" DESC, l."Id" DESC LIMIT 1`
   );
   if (rows.length === 0) {
-    return { cashBalance: 0, cardBalance: 0, total: 0 };
+    return { cashBalance: 0, cardBalance: 0, total: 0, currency: null };
   }
   return {
     cashBalance: Number(rows[0].cashBalance),
     cardBalance: Number(rows[0].cardBalance),
     total: Number(rows[0].total),
+    currency: rows[0].currency,
   };
 }
 
@@ -70,7 +98,7 @@ async function findAnchorBalance(client, { createdAt, id }) {
   return { cashBalance: Number(rows[0].cashBalance), cardBalance: Number(rows[0].cardBalance) };
 }
 
-async function insertContribution(client, { id, createdAt, type, amount, paymentMode }) {
+async function insertContribution(client, { id, createdAt, type, amount, paymentMode, currency }) {
   const signedAmount = type === 'income' ? Number(amount) : -Number(amount);
   const anchor = await findAnchorBalance(client, { createdAt, id });
 
@@ -79,8 +107,8 @@ async function insertContribution(client, { id, createdAt, type, amount, payment
   const total = cashBalance + cardBalance;
 
   await client.query(
-    `INSERT INTO "Balances" ("Log id", "Cash balance", "Card balance", "Total") VALUES ($1, $2, $3, $4)`,
-    [id, cashBalance, cardBalance, total]
+    `INSERT INTO "Balances" ("Log id", "Cash balance", "Card balance", "Total", "Currency") VALUES ($1, $2, $3, $4, $5)`,
+    [id, cashBalance, cardBalance, total, currency]
   );
 
   await propagateDelta(client, {
@@ -91,19 +119,19 @@ async function insertContribution(client, { id, createdAt, type, amount, payment
     totalDelta: signedAmount,
   });
 
-  return { cashBalance, cardBalance, total };
+  return { cashBalance, cardBalance, total, currency };
 }
 
-export async function addLogEntry({ type, amount, category, paymentMode, createdAt }) {
+export async function addLogEntry({ type, amount, category, paymentMode, createdAt, currency, timezone }) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     const logResult = await client.query(
-      `INSERT INTO "Logs" ("Type", "Amount", "Category", "Payment mode", "Created at")
-       VALUES ($1, $2, $3, $4, COALESCE($5, now()))
+      `INSERT INTO "Logs" ("Type", "Amount", "Category", "Payment mode", "Created at", "Timezone")
+       VALUES ($1, $2, $3, $4, COALESCE($5, now()), $6)
        RETURNING "Id" AS "id", "Created at" AS "createdAt"`,
-      [type, amount, category, paymentMode, createdAt ?? null]
+      [type, amount, category, paymentMode, createdAt ?? null, timezone]
     );
     const log = logResult.rows[0];
     const own = await insertContribution(client, {
@@ -112,6 +140,7 @@ export async function addLogEntry({ type, amount, category, paymentMode, created
       type,
       amount,
       paymentMode,
+      currency,
     });
 
     await client.query('COMMIT');
@@ -134,15 +163,25 @@ export async function setLogNote(logId, note) {
 
 export async function getLogById(logId) {
   const { rows } = await pool.query(
-    `SELECT "Id" AS "id", "Created at" AS "createdAt", "Type" AS "type", "Amount" AS "amount",
-            "Category" AS "category", "Payment mode" AS "paymentMode", "Note" AS "note"
-     FROM "Logs" WHERE "Id" = $1`,
+    `SELECT l."Id" AS "id", l."Created at" AS "createdAt", l."Type" AS "type", l."Amount" AS "amount",
+            l."Category" AS "category", l."Payment mode" AS "paymentMode", l."Note" AS "note",
+            l."Timezone" AS "timezone", b."Currency" AS "currency"
+     FROM "Logs" l
+     LEFT JOIN "Balances" b ON b."Log id" = l."Id"
+     WHERE l."Id" = $1`,
     [logId]
   );
   return rows[0] ?? null;
 }
 
-async function rebuildAllBalances(client) {
+// Rebuild wipes and recreates every Balances row from Logs in order — but
+// currency lives on Balances, not Logs, so the currency each row was
+// originally created under must be snapshotted BEFORE the wipe and carried
+// forward per log id, or a repair run would silently erase currency history.
+async function rebuildAllBalances(client, fallbackCurrency) {
+  const { rows: currencySnapshot } = await client.query(`SELECT "Log id" AS "logId", "Currency" AS "currency" FROM "Balances"`);
+  const currencyByLogId = new Map(currencySnapshot.map((r) => [r.logId, r.currency]));
+
   await client.query(`DELETE FROM "Balances"`);
   const { rows: remaining } = await client.query(
     `SELECT "Id" AS "id", "Type" AS "type", "Amount" AS "amount", "Payment mode" AS "paymentMode"
@@ -156,20 +195,21 @@ async function rebuildAllBalances(client) {
     if (log.paymentMode === 'physical') cashBalance += signedAmount;
     else cardBalance += signedAmount;
     const total = cashBalance + cardBalance;
+    const currency = currencyByLogId.get(log.id) ?? fallbackCurrency;
     await client.query(
-      `INSERT INTO "Balances" ("Log id", "Cash balance", "Card balance", "Total") VALUES ($1, $2, $3, $4)`,
-      [log.id, cashBalance, cardBalance, total]
+      `INSERT INTO "Balances" ("Log id", "Cash balance", "Card balance", "Total", "Currency") VALUES ($1, $2, $3, $4, $5)`,
+      [log.id, cashBalance, cardBalance, total, currency]
     );
   }
 
   return { cashBalance, cardBalance, total: cashBalance + cardBalance };
 }
 
-export async function repairAllBalances() {
+export async function repairAllBalances(fallbackCurrency) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const result = await rebuildAllBalances(client);
+    const result = await rebuildAllBalances(client, fallbackCurrency);
     await client.query('COMMIT');
     return result;
   } catch (err) {
@@ -186,9 +226,12 @@ export async function deleteLogById(logId) {
     await client.query('BEGIN');
 
     const { rows: existing } = await client.query(
-      `SELECT "Id" AS "id", "Type" AS "type", "Amount" AS "amount", "Category" AS "category",
-              "Payment mode" AS "paymentMode", "Created at" AS "createdAt", "Note" AS "note"
-       FROM "Logs" WHERE "Id" = $1`,
+      `SELECT l."Id" AS "id", l."Type" AS "type", l."Amount" AS "amount", l."Category" AS "category",
+              l."Payment mode" AS "paymentMode", l."Created at" AS "createdAt", l."Note" AS "note",
+              l."Timezone" AS "timezone", b."Currency" AS "currency"
+       FROM "Logs" l
+       LEFT JOIN "Balances" b ON b."Log id" = l."Id"
+       WHERE l."Id" = $1`,
       [logId]
     );
     if (existing.length === 0) {
@@ -212,15 +255,24 @@ export async function deleteLogById(logId) {
   }
 }
 
+// `timezone` is intentionally NOT a parameter here — a log's Timezone is set
+// once at creation and never changes via /edit; the caller re-parses the
+// typed date using that original timezone before calling this. `currency`
+// likewise always carries forward from the log's own existing Balances row
+// (fetched below), never from the live Constants cache, so an edit never
+// silently reassigns a past entry to today's currency.
 export async function editLogById(logId, { type, amount, category, paymentMode, createdAt, note }) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     const { rows: existing } = await client.query(
-      `SELECT "Id" AS "id", "Type" AS "type", "Amount" AS "amount", "Category" AS "category",
-              "Payment mode" AS "paymentMode", "Created at" AS "createdAt", "Note" AS "note"
-       FROM "Logs" WHERE "Id" = $1`,
+      `SELECT l."Id" AS "id", l."Type" AS "type", l."Amount" AS "amount", l."Category" AS "category",
+              l."Payment mode" AS "paymentMode", l."Created at" AS "createdAt", l."Note" AS "note",
+              l."Timezone" AS "timezone", b."Currency" AS "currency"
+       FROM "Logs" l
+       LEFT JOIN "Balances" b ON b."Log id" = l."Id"
+       WHERE l."Id" = $1`,
       [logId]
     );
     if (existing.length === 0) {
@@ -253,7 +305,9 @@ export async function editLogById(logId, { type, amount, category, paymentMode, 
 
     let restored = null;
     if (ledgerAffectingChanged) {
-      restored = await insertContribution(client, { id: logId, createdAt, type, amount, paymentMode });
+      restored = await insertContribution(client, {
+        id: logId, createdAt, type, amount, paymentMode, currency: before.currency,
+      });
     }
 
     await client.query('COMMIT');
@@ -283,9 +337,12 @@ export async function getCurrentBalance() {
 
 export async function getRecentHistory(limit = 10) {
   const { rows } = await pool.query(
-    `SELECT "Id" AS "id", "Created at" AS "createdAt", "Type" AS "type", "Amount" AS "amount",
-            "Category" AS "category", "Payment mode" AS "paymentMode", "Note" AS "note"
-     FROM "Logs" ORDER BY "Created at" DESC LIMIT $1`,
+    `SELECT l."Id" AS "id", l."Created at" AS "createdAt", l."Type" AS "type", l."Amount" AS "amount",
+            l."Category" AS "category", l."Payment mode" AS "paymentMode", l."Note" AS "note",
+            l."Timezone" AS "timezone", b."Currency" AS "currency"
+     FROM "Logs" l
+     LEFT JOIN "Balances" b ON b."Log id" = l."Id"
+     ORDER BY l."Created at" DESC LIMIT $1`,
     [limit]
   );
   return rows;
@@ -295,7 +352,8 @@ export async function getLogsBetween(fromDate, toDate) {
   const { rows } = await pool.query(
     `SELECT l."Id" AS "id", l."Created at" AS "createdAt", l."Type" AS "type", l."Amount" AS "amount",
             l."Category" AS "category", l."Payment mode" AS "paymentMode", l."Note" AS "note",
-            b."Cash balance" AS "cashBalance", b."Card balance" AS "cardBalance", b."Total" AS "total"
+            l."Timezone" AS "timezone",
+            b."Cash balance" AS "cashBalance", b."Card balance" AS "cardBalance", b."Total" AS "total", b."Currency" AS "currency"
      FROM "Logs" l
      JOIN "Balances" b ON b."Log id" = l."Id"
      WHERE l."Created at" BETWEEN $1 AND $2

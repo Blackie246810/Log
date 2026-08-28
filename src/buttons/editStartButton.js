@@ -31,14 +31,17 @@ export async function handle(interaction) {
     return;
   }
 
+  // Placeholders reflect THIS log's own stored timezone/currency, not the
+  // live Constants value — an edit must default to what the entry was
+  // originally created under.
   const modal = new ModalBuilder()
     .setCustomId(`edit-fields-modal:${log.id}`)
     .setTitle(`Edit entry #${log.id}`);
 
   const dateInput = new TextInputBuilder()
     .setCustomId('date').setLabel('Date & Time (DD-MM-YYYY HH:MM, 24H Format)').setStyle(TextInputStyle.Short)
-    .setPlaceholder('e.g. 22-08-2026 14:30')
-    .setValue(formatDateTimeDDMMYYYY(new Date(log.createdAt))).setRequired(true);
+    .setPlaceholder(`e.g. 22-08-2026 14:30 (${log.timezone})`)
+    .setValue(formatDateTimeDDMMYYYY(new Date(log.createdAt), log.timezone)).setRequired(true);
 
   const categoryInput = new TextInputBuilder()
     .setCustomId('category').setLabel('Category').setStyle(TextInputStyle.Short)
@@ -46,6 +49,7 @@ export async function handle(interaction) {
 
   const amountInput = new TextInputBuilder()
     .setCustomId('amount').setLabel('Amount').setStyle(TextInputStyle.Short)
+    .setPlaceholder(`Numeric value in ${log.currency}`)
     .setValue(String(Number(log.amount))).setRequired(true);
 
   const paymentModeInput = new TextInputBuilder()

@@ -1,5 +1,6 @@
 import { EmbedBuilder } from 'discord.js';
 import { getRecentHistory } from '../db.js';
+import { formatDateTimeDDMMYYYY } from '../constants.js';
 import { logError } from '../errorReporter.js';
 
 export const customId = 'history-modal';
@@ -29,9 +30,10 @@ export async function handle(interaction) {
 
     const lines = rows.map((r) => {
       const sign = r.type === 'income' ? '+' : '-';
-      const date = new Date(r.createdAt).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Kolkata' });
+      // Each row's own stored timezone/currency — not the live constants.
+      const date = formatDateTimeDDMMYYYY(new Date(r.createdAt), r.timezone);
       const note = r.note ? ` — ${r.note}` : '';
-      return `\`#${r.id}\` ${sign}₹${Number(r.amount).toFixed(2)} · ${r.category} · ${r.paymentMode} · ${date}${note}`;
+      return `\`#${r.id}\` ${sign}${r.currency} ${Number(r.amount).toFixed(2)} · ${r.category} · ${r.paymentMode} · ${date} (${r.timezone})${note}`;
     });
 
     const embed = new EmbedBuilder()

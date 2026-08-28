@@ -2,9 +2,10 @@ import { EmbedBuilder } from 'discord.js';
 
 export function buildLogEmbed(log, balance) {
   const sign = log.type === 'income' ? '+' : '-';
+  const currency = log.currency ?? balance?.currency ?? '';
   const embed = new EmbedBuilder()
     .setColor(log.type === 'income' ? 0x2ecc71 : 0xe74c3c)
-    .setTitle(`${sign}₹${Number(log.amount).toFixed(2)}`)
+    .setTitle(`${sign}${currency} ${Number(log.amount).toFixed(2)}`)
     .addFields(
       { name: 'Category', value: log.category, inline: true },
       { name: 'Payment mode', value: log.paymentMode, inline: true },
@@ -14,10 +15,11 @@ export function buildLogEmbed(log, balance) {
     .setTimestamp(log.createdAt);
 
   if (balance) {
+    const bc = balance.currency ?? currency;
     embed.addFields(
-      { name: 'Cash', value: `₹${balance.cashBalance.toFixed(2)}`, inline: true },
-      { name: 'Card', value: `₹${balance.cardBalance.toFixed(2)}`, inline: true },
-      { name: 'Total', value: `₹${balance.total.toFixed(2)}`, inline: true },
+      { name: 'Cash', value: `${bc} ${balance.cashBalance.toFixed(2)}`, inline: true },
+      { name: 'Card', value: `${bc} ${balance.cardBalance.toFixed(2)}`, inline: true },
+      { name: 'Total', value: `${bc} ${balance.total.toFixed(2)}`, inline: true },
     );
     if (balance.total < 0) embed.addFields({ name: '⚠️ Warning', value: 'Total balance is negative.' });
   }

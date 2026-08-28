@@ -9,6 +9,8 @@ import * as fileCmd from './commands/file.js';
 import * as deleteCmd from './commands/delete.js';
 import * as editCmd from './commands/edit.js';
 import * as clearCmd from './commands/clear.js';
+import * as currencyCmd from './commands/currency.js';
+import * as timezoneCmd from './commands/timezone.js';
 import * as logModal from './modals/logModal.js';
 import * as noteModal from './modals/noteModal.js';
 import * as deleteModal from './modals/deleteModal.js';
@@ -17,6 +19,8 @@ import * as fileModal from './modals/fileModal.js';
 import * as editIdModal from './modals/editIdModal.js';
 import * as editFieldsModal from './modals/editFieldsModal.js';
 import * as editNoteModal from './modals/editNoteModal.js';
+import * as currencyModal from './modals/currencyModal.js';
+import * as timezoneModal from './modals/timezoneModal.js';
 import * as logNoteButton from './buttons/logNoteButton.js';
 import * as deleteConfirmButton from './buttons/deleteConfirmButton.js';
 import * as editConfirmButton from './buttons/editConfirmButton.js';
@@ -24,6 +28,7 @@ import * as editStartButton from './buttons/editStartButton.js';
 import { logError, reportError } from './errorReporter.js';
 import { startHealthServer } from './health.js';
 import { handleAiMessage } from './aiMessageHandler.js';
+import { loadConstants } from './constantsStore.js';
 
 dotenv.config();
 
@@ -33,17 +38,45 @@ const client = new Client({
 });
 
 client.commands = new Collection();
-for (const cmd of [logCmd, balanceCmd, historyCmd, undoCmd, categoriesCmd, fileCmd, deleteCmd, editCmd, clearCmd]) {
+for (const cmd of [logCmd, balanceCmd, historyCmd, undoCmd, categoriesCmd, fileCmd, deleteCmd, editCmd, clearCmd, currencyCmd, timezoneCmd]) {
   client.commands.set(cmd.data.name, cmd);
 }
 
-client.once('clientReady', () => {
+// Every slash command, modal, and button is gated to the bot owner alone —
+// same env var the AI chat and error-DM already use. Anyone else is told
+// plainly rather than the interaction silently doing nothing.
+function isOwner(userId) {
+  return userId === process.env.DISCORD_OWNER_ID;
+}
+
+async function rejectUnauthorized(interaction) {
+  const payload = { content: 'You are not authorized for this action.', flags: 64 };
+  try {
+    if (interaction.isModalSubmit() || interaction.isButton() || interaction.isChatInputCommand()) {
+      await interaction.reply(payload);
+    }
+  } catch (err) {
+    logError('unauthorized interaction reply failed', err);
+  }
+}
+
+client.once('clientReady', async () => {
   console.log(`Logged in as ${client.user.tag}`);
+  try {
+    await loadConstants();
+  } catch (err) {
+    logError('startup: loadConstants failed', err);
+  }
   const port = Number(process.env.PORT) || Number(process.env.HEALTH_PORT) || 3000;
   startHealthServer(client, port);
 });
 
 client.on('interactionCreate', async (interaction) => {
+  if (!isOwner(interaction.user.id)) {
+    await rejectUnauthorized(interaction);
+    return;
+  }
+
   try {
     if (interaction.isChatInputCommand()) {
       const command = client.commands.get(interaction.commandName);
@@ -69,6 +102,10 @@ client.on('interactionCreate', async (interaction) => {
         await editFieldsModal.handle(interaction);
       } else if (interaction.customId.startsWith(editNoteModal.customIdPrefix)) {
         await editNoteModal.handle(interaction);
+      } else if (interaction.customId === currencyModal.customId) {
+        await currencyModal.handle(interaction);
+      } else if (interaction.customId === timezoneModal.customId) {
+        await timezoneModal.handle(interaction);
       }
       return;
     }
@@ -102,6 +139,14 @@ client.on('interactionCreate', async (interaction) => {
 
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
+  if (message.author.id !== process.env.DISCORD_OWNER_ID) {
+    try {
+      await message.reply('You are not authorized for this action.');
+    } catch (err) {
+      logError('unauthorized message reply failed', err);
+    }
+    return;
+  }
   try {
     await handleAiMessage(message);
   } catch (err) {

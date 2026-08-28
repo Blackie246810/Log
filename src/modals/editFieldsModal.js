@@ -13,6 +13,24 @@ function diffLine(label, oldVal, newVal) {
 export async function handle(interaction) {
   const [, logId] = interaction.customId.split(':');
 
+  let original;
+  try {
+    original = await getLogById(logId);
+  } catch (err) {
+    logError('edit-fields-modal lookup', err);
+    await interaction.reply({ content: 'Database error while looking up that entry. Check the console for details.' });
+    return;
+  }
+  if (!original) {
+    await interaction.reply({ content: `Entry #${logId} no longer exists.` });
+    return;
+  }
+
+  // The date is re-parsed using THIS log's own stored timezone — never the
+  // live Constants timezone — so re-typing the same wall-clock time doesn't
+  // silently shift the stored instant.
+  const timezone = original.timezone;
+
   const rawDate = interaction.fields.getTextInputValue('date').trim();
   const rawCategory = interaction.fields.getTextInputValue('category').trim();
   const rawAmount = interaction.fields.getTextInputValue('amount').trim();
@@ -21,9 +39,9 @@ export async function handle(interaction) {
 
   const errorBlocks = [];
 
-  const parsedDate = parseDateTimeDDMMYYYY(rawDate);
+  const parsedDate = parseDateTimeDDMMYYYY(rawDate, timezone);
   if (!parsedDate) {
-    errorBlocks.push(`Unexpected value for [date]\nexpected values: DD-MM-YYYY HH:mm format (24-hour, IST)\ngiven value: ${rawDate}`);
+    errorBlocks.push(`Unexpected value for [date]\nexpected values: DD-MM-YYYY HH:mm format (24-hour, ${timezone})\ngiven value: ${rawDate}`);
   }
 
   const category = matchCanonical(rawCategory, CATEGORIES);
@@ -53,19 +71,6 @@ export async function handle(interaction) {
     return;
   }
 
-  let original;
-  try {
-    original = await getLogById(logId);
-  } catch (err) {
-    logError('edit-fields-modal lookup', err);
-    await interaction.reply({ content: 'Database error while looking up that entry. Check the console for details.' });
-    return;
-  }
-  if (!original) {
-    await interaction.reply({ content: `Entry #${logId} no longer exists.` });
-    return;
-  }
-
   const type = paymentFlowCanon.toLowerCase();
   const paymentMode = paymentModeCanon.toLowerCase();
 
@@ -74,13 +79,14 @@ export async function handle(interaction) {
     originalNote: original.note,
   });
 
+  const currency = original.currency;
   const embed = new EmbedBuilder()
     .setColor(0x3498db)
     .setTitle(`Confirm edit — entry #${logId}`)
     .setDescription([
-      diffLine('Date', formatDateTimeDDMMYYYY(new Date(original.createdAt)), formatDateTimeDDMMYYYY(parsedDate)),
+      diffLine('Date', formatDateTimeDDMMYYYY(new Date(original.createdAt), timezone), formatDateTimeDDMMYYYY(parsedDate, timezone)),
       diffLine('Category', original.category, category),
-      diffLine('Amount', `₹${Number(original.amount).toFixed(2)}`, `₹${amountNum.toFixed(2)}`),
+      diffLine('Amount', `${currency} ${Number(original.amount).toFixed(2)}`, `${currency} ${amountNum.toFixed(2)}`),
       diffLine('Payment mode', original.paymentMode, paymentMode),
       diffLine('Flow', original.type, type),
     ].join('\n'));

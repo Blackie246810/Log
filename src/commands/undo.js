@@ -1,5 +1,6 @@
 import { SlashCommandBuilder, EmbedBuilder, InteractionContextType } from 'discord.js';
 import { undoLastEntry } from '../db.js';
+import { getCurrency } from '../constantsStore.js';
 import { logError } from '../errorReporter.js';
 
 export const data = new SlashCommandBuilder()
@@ -17,14 +18,16 @@ export async function execute(interaction) {
 
     const { deleted, restored } = result;
     const sign = deleted.type === 'income' ? '+' : '-';
+    const deletedCurrency = deleted.currency ?? getCurrency();
+    const restoredCurrency = restored.currency ?? getCurrency();
     const embed = new EmbedBuilder()
       .setColor(0xf39c12)
       .setTitle(`Undone: entry #${deleted.id}`)
-      .setDescription(`${sign}₹${Number(deleted.amount).toFixed(2)} · ${deleted.category} · ${deleted.paymentMode}`)
+      .setDescription(`${sign}${deletedCurrency} ${Number(deleted.amount).toFixed(2)} · ${deleted.category} · ${deleted.paymentMode}`)
       .addFields(
-        { name: 'Cash', value: `₹${restored.cashBalance.toFixed(2)}`, inline: true },
-        { name: 'Card', value: `₹${restored.cardBalance.toFixed(2)}`, inline: true },
-        { name: 'Total', value: `₹${restored.total.toFixed(2)}`, inline: true },
+        { name: 'Cash', value: `${restoredCurrency} ${restored.cashBalance.toFixed(2)}`, inline: true },
+        { name: 'Card', value: `${restoredCurrency} ${restored.cardBalance.toFixed(2)}`, inline: true },
+        { name: 'Total', value: `${restoredCurrency} ${restored.total.toFixed(2)}`, inline: true },
       )
       .setTimestamp();
 

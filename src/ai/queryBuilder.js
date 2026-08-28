@@ -9,6 +9,7 @@ const TABLE_MAP = {
       category: '"Category"',
       payment_mode: '"Payment mode"',
       note: '"Note"',
+      timezone: '"Timezone"',
     },
   },
   balances: {
@@ -20,6 +21,7 @@ const TABLE_MAP = {
       card_balance: '"Card balance"',
       total: '"Total"',
       created_at: '"Created at"',
+      currency: '"Currency"',
     },
   },
 };

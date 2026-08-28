@@ -1,6 +1,7 @@
 import { ButtonBuilder, ButtonStyle, ActionRowBuilder } from 'discord.js';
 import { addLogEntry } from '../db.js';
 import { CATEGORIES, PAYMENT_MODES, PAYMENT_FLOWS, matchCanonical, parseDateTimeDDMMYYYY } from '../constants.js';
+import { getCurrency, getTimezone } from '../constantsStore.js';
 import { buildLogEmbed } from '../embeds.js';
 import { logError } from '../errorReporter.js';
 
@@ -15,10 +16,13 @@ export async function handle(interaction) {
 
   const errorBlocks = [];
 
-  const parsedDate = parseDateTimeDDMMYYYY(rawDate);
+  const timezone = getTimezone();
+  const currency = getCurrency();
+
+  const parsedDate = parseDateTimeDDMMYYYY(rawDate, timezone);
   if (!parsedDate) {
     errorBlocks.push(
-      `Unexpected value for [date]\nexpected values: DD-MM-YYYY HH:mm format (24-hour, IST)\ngiven value: ${rawDate}`
+      `Unexpected value for [date]\nexpected values: DD-MM-YYYY HH:mm format (24-hour, ${timezone})\ngiven value: ${rawDate}`
     );
   }
 
@@ -64,7 +68,7 @@ export async function handle(interaction) {
   let result;
   try {
     result = await addLogEntry({
-      type, amount: amountNum, category, paymentMode, createdAt: parsedDate,
+      type, amount: amountNum, category, paymentMode, createdAt: parsedDate, currency, timezone,
     });
   } catch (err) {
     logError('log-modal DB write', err);
@@ -73,7 +77,7 @@ export async function handle(interaction) {
   }
 
   const embed = buildLogEmbed(
-    { id: result.logId, createdAt: result.createdAt, type, amount: amountNum, category, paymentMode },
+    { id: result.logId, createdAt: result.createdAt, type, amount: amountNum, category, paymentMode, currency },
     result
   );
 

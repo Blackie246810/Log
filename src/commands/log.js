@@ -1,5 +1,6 @@
 import { SlashCommandBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder, InteractionContextType } from 'discord.js';
 import { nowDateTimeDDMMYYYY } from '../constants.js';
+import { getCurrency, getTimezone } from '../constantsStore.js';
 
 export const data = new SlashCommandBuilder()
   .setName('log')
@@ -13,7 +14,7 @@ export async function execute(interaction) {
     .setCustomId('date')
     .setLabel('Date & Time (DD-MM-YYYY HH:MM, 24H Format)')
     .setStyle(TextInputStyle.Short)
-    .setPlaceholder('e.g. 22-08-2026 14:30')
+    .setPlaceholder(`e.g. 22-08-2026 14:30 (${getTimezone()})`)
     .setValue(nowDateTimeDDMMYYYY())
     .setRequired(true);
 
@@ -28,7 +29,7 @@ export async function execute(interaction) {
     .setCustomId('amount')
     .setLabel('Amount')
     .setStyle(TextInputStyle.Short)
-    .setPlaceholder('Numeric value of money involved')
+    .setPlaceholder(`Numeric value in ${getCurrency()}`)
     .setRequired(true);
 
   const paymentModeInput = new TextInputBuilder()

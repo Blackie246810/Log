@@ -70,8 +70,11 @@ const COLORS = {
   separator: '#3a3b3f',
 };
 
+// Currency now renders as a 3-letter ISO code prefix (e.g. "USD 450.00" or
+// "-USD 450.00"), not a fixed symbol — accept an optional leading code,
+// with or without the sign before it, as still "numeric" for right-align.
 function looksNumeric(value) {
-  return /^-?[₹$]?[\d,]+(\.\d+)?%?$/.test(String(value ?? '').trim());
+  return /^-?([A-Z]{3}\s?)?-?[\d,]+(\.\d+)?%?$/.test(String(value ?? '').trim());
 }
 
 // Binary-searches for the longest prefix of `text` that fits in `maxWidth`

@@ -3,6 +3,7 @@ import { toolDeclarations, callTool } from './tools.js';
 import { CATEGORIES } from '../constants.js';
 import { getConversationHistory, saveConversationHistory, clearConversationHistory } from '../db.js';
 import { MAX_TABLES_PER_MESSAGE } from '../tableImage.js';
+import { getCurrency, getTimezone } from '../constantsStore.js';
 
 const MODEL = 'gemini-3.6-flash';
 const MAX_HISTORY_TURNS = 500;
@@ -20,7 +21,7 @@ function buildSystemInstruction(botName) {
 
     `Every entry gets a numeric ID (e.g. #123), which /edit and /delete use to target a specific entry. All of this — every modal, button, and confirmation — is entirely separate from you: you cannot trigger any of it yourself, you can only read data via query_data. If asked to log, edit, delete, or undo something, tell the user which command to run instead of claiming to have done it.`,
 
-    `Data: table logs (logs every transaction) and balances (running balance after each transaction, own timestamps). Amounts in ₹, always stored positive — type (income/expense) sets the sign, sum accordingly. Valid categories: ${CATEGORIES.join(', ')}. `,
+    `Data: table logs (logs every transaction, each with its own Timezone) and balances (running balance after each transaction, each with its own Currency — a 3-letter ISO code, e.g. USD). Amounts are always stored positive — type (income/expense) sets the sign, sum accordingly. Currency and timezone can change over time via owner commands, so a result spanning multiple currencies must be labelled per-row, not assumed uniform — never just prefix a single symbol over everything. The live/current currency is ${getCurrency()} and timezone is ${getTimezone()}, used for "now"-relative questions and any answer not tied to older rows. Valid categories: ${CATEGORIES.join(', ')}. `,
 
     `Before answering from results: confirm you selected what was actually asked (right table/filter/aggregate), recompute totals yourself rather than trusting them blindly, and re-query instead of rationalizing an answer that looks off (empty, huge, negative where impossible). State assumptions (e.g. "this month" = calendar month).`,
 
@@ -30,7 +31,7 @@ function buildSystemInstruction(botName) {
 
     `Formatting: plain Discord DM text only. Bold, italic, strikethrough, inline code, code blocks, blockquotes, and bullet/numbered lists all render fine — use them. Headers work too, but keep them rare — this is a DM, not a doc, so reserve them for when they genuinely help. Never use Markdown tables or HTML — Discord renders neither; both show up as literal pipe characters or raw tags.`,
 
-    `For tabular data (e.g. a spending breakdown, a list of entries), don't build a text table and don't use a label/value grid — output a fenced block tagged exactly table containing JSON in this shape: {"title": "optional string", "columns": ["Date", "Category", "Amount"], "rows": [["22-08-2026", "Food/Drink", "₹450.00"], ["21-08-2026", "Travel", "₹120.00"]]}. Each row array must have exactly as many entries as columns, in the same order. That block gets rendered as an actual image of a table — one image per table block, never shown as raw text — so write only valid JSON inside it, no extra commentary in that block, and put any surrounding sentence(s) as normal text outside it.`,
+    `For tabular data (e.g. a spending breakdown, a list of entries), don't build a text table and don't use a label/value grid — output a fenced block tagged exactly table containing JSON in this shape: {"title": "optional string", "columns": ["Date", "Category", "Amount"], "rows": [["22-08-2026", "Food/Drink", "USD 450.00"], ["21-08-2026", "Travel", "USD 120.00"]]}. Prefix amount cells with that row's own currency code (not a symbol), since currency can differ row-to-row. Each row array must have exactly as many entries as columns, in the same order. That block gets rendered as an actual image of a table — one image per table block, never shown as raw text — so write only valid JSON inside it, no extra commentary in that block, and put any surrounding sentence(s) as normal text outside it.`,
 
     `Table images are sized to fit their content well, not a fixed row/column count — long header or cell text wraps onto more lines rather than ever getting cut off, and a table that ends up too wide or too tall for one comfortable "glance at it" image is automatically split by the system into more images. You can't calculate the exact pixel size something will render at, so don't try to hit an exact number — instead, use judgement to make the split itself readable: if a dataset has many attributes, consider grouping related columns into logically separate tables with their own titles (e.g. "core details" vs "amounts/balances"), the same way you'd design separate report sections, rather than always emitting one wide table and leaving the grouping to chance. If a result has a lot of rows, splitting it into consecutive "<title> — part 1 of N", "part 2 of N", ... table blocks is usually clearer than one huge block. You don't have to get either of these exactly right — the system guarantees every row and column shows up somewhere, splitting further on its own if your grouping still doesn't fit.`,
 
@@ -49,8 +50,9 @@ function getDefaultClient() {
 }
 
 function currentDateContext() {
-  const formatter = new Intl.DateTimeFormat('en-IN', {
-    timeZone: 'Asia/Kolkata',
+  const timezone = getTimezone();
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone,
     weekday: 'long',
     year: 'numeric',
     month: 'long',
@@ -59,7 +61,7 @@ function currentDateContext() {
     minute: '2-digit',
     hour12: true,
   });
-  return `${formatter.format(new Date())} IST`;
+  return `${formatter.format(new Date())} (${timezone})`;
 }
 
 export async function askAi(userMessage, botName, client = getDefaultClient()) {
