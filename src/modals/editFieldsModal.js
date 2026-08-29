@@ -1,8 +1,9 @@
 import { ButtonBuilder, ButtonStyle, ActionRowBuilder, EmbedBuilder } from 'discord.js';
 import { getLogById } from '../db.js';
-import { CATEGORIES, PAYMENT_MODES, PAYMENT_FLOWS, matchCanonical, parseDateTimeDDMMYYYY, formatDateTimeDDMMYYYY } from '../constants.js';
+import { formatDateTimeDDMMYYYY } from '../constants.js';
 import { logError, errorDetail } from '../errorReporter.js';
 import { setPendingEdit } from '../pendingEdits.js';
+import { validateLogFields } from '../logFieldsValidation.js';
 
 export const customIdPrefix = 'edit-fields-modal:';
 
@@ -31,48 +32,13 @@ export async function handle(interaction) {
   // silently shift the stored instant.
   const timezone = original.timezone;
 
-  const rawDate = interaction.fields.getTextInputValue('date').trim();
-  const rawCategory = interaction.fields.getTextInputValue('category').trim();
-  const rawAmount = interaction.fields.getTextInputValue('amount').trim();
-  const rawPaymentMode = interaction.fields.getTextInputValue('payment_mode').trim();
-  const rawPaymentFlow = interaction.fields.getTextInputValue('payment_flow').trim();
-
-  const errorBlocks = [];
-
-  const parsedDate = parseDateTimeDDMMYYYY(rawDate, timezone);
-  if (!parsedDate) {
-    errorBlocks.push(`Unexpected value for [date]\nexpected values: DD-MM-YYYY HH:mm format (24-hour, ${timezone})\ngiven value: ${rawDate}`);
-  }
-
-  const category = matchCanonical(rawCategory, CATEGORIES);
-  if (!category) {
-    errorBlocks.push(`Unexpected value for [category]\nexpected values: ${CATEGORIES.join(', ')}\ngiven value: ${rawCategory}`);
-  }
-
-  const amountNum = Number(rawAmount);
-  if (!Number.isFinite(amountNum) || amountNum <= 0) {
-    errorBlocks.push(`Unexpected value for [amount]\nexpected values: a positive number\ngiven value: ${rawAmount}`);
-  }
-
-  const paymentModeCanon = matchCanonical(rawPaymentMode, PAYMENT_MODES);
-  if (!paymentModeCanon) {
-    errorBlocks.push(`Unexpected value for [payment_mode]\nexpected values: ${PAYMENT_MODES.join(', ')}\ngiven value: ${rawPaymentMode}`);
-  }
-
-  const paymentFlowCanon = matchCanonical(rawPaymentFlow, PAYMENT_FLOWS);
-  if (!paymentFlowCanon) {
-    errorBlocks.push(`Unexpected value for [payment_flow]\nexpected values: ${PAYMENT_FLOWS.join(', ')}\ngiven value: ${rawPaymentFlow}`);
-  }
-
-  if (errorBlocks.length > 0) {
-    const errorText = errorBlocks.join('\n\n');
-    logError('edit-fields-modal validation', errorText);
-    await interaction.reply({ content: errorText });
+  const validated = validateLogFields(interaction.fields, timezone);
+  if (!validated.ok) {
+    logError('edit-fields-modal validation', validated.errorText);
+    await interaction.reply({ content: validated.errorText });
     return;
   }
-
-  const type = paymentFlowCanon.toLowerCase();
-  const paymentMode = paymentModeCanon.toLowerCase();
+  const { type, amount: amountNum, category, paymentMode, createdAt: parsedDate } = validated.value;
 
   setPendingEdit(logId, {
     type, amount: amountNum, category, paymentMode, createdAt: parsedDate,

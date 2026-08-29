@@ -1,5 +1,6 @@
 import pg from 'pg';
 import dotenv from 'dotenv';
+import { logError } from './errorReporter.js';
 
 dotenv.config();
 
@@ -12,6 +13,17 @@ export const pool = new Pool({
   database: process.env.DBNAME,
   port: Number(process.env.DBPORT),
   ssl: { rejectUnauthorized: false },
+});
+
+// pg's Pool emits 'error' on an IDLE client (one sitting in the pool, not
+// mid-query) when its connection drops — a dropped network link, the DB
+// restarting, etc. This is independent of any query currently in flight.
+// Without a listener, that's an unhandled 'error' event, and Node treats an
+// unhandled EventEmitter 'error' as fatal — it crashes the whole process.
+// Logging it here keeps the bot alive; the pool reconnects new clients on
+// the next query on its own.
+pool.on('error', (err) => {
+  logError('pg pool: idle client error', err);
 });
 
 // ---------------------------------------------------------------------------
@@ -193,7 +205,7 @@ async function rebuildAllBalances(client, fallbackCurrency) {
   for (const log of remaining) {
     const signedAmount = log.type === 'income' ? Number(log.amount) : -Number(log.amount);
     if (log.paymentMode === 'physical') cashBalance += signedAmount;
-    else cardBalance += signedAmount;
+    else if (log.paymentMode === 'digital') cardBalance += signedAmount;
     const total = cashBalance + cardBalance;
     const currency = currencyByLogId.get(log.id) ?? fallbackCurrency;
     await client.query(

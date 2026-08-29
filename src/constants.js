@@ -141,7 +141,7 @@ export function nowDateTimeDDMMYYYY(timeZone = getTimezone()) {
 
 export function defaultFileFromDate(timeZone = getTimezone()) {
   const p = toZonedParts(new Date(), timeZone);
-  return fromZonedParts({ year: p.year, month: p.month - 1, day: 1, hours: 0, minutes: 0 }, timeZone);
+  return fromZonedParts({ year: p.year, month: p.month, day: 1, hours: 0, minutes: 0 }, timeZone);
 }
 
 export const FILE_EXPORT_EPOCH = new Date(0);

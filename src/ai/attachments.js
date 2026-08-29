@@ -92,30 +92,42 @@ export async function buildAttachmentParts(message) {
 
   for (const attachment of message.attachments.values()) {
     if (count >= MAX_FILES) {
-      warnings.push(`${attachment.name}: skipped (max ${MAX_FILES} files per message)`);
+      warnings.push(
+        `${attachment.name}: skipped — max ${MAX_FILES} files per message. Send it in a follow-up message instead.`
+      );
       continue;
     }
 
     const mimeType = resolveMimeType(attachment);
     if (!isSupportedMimeType(mimeType)) {
-      warnings.push(`${attachment.name}: skipped (unsupported file type "${mimeType}")`);
+      warnings.push(
+        `${attachment.name}: skipped — unsupported file type ("${mimeType}"). Supported: images, audio, video, text/CSV/JSON, and PDF. Try re-exporting or converting it to one of those.`
+      );
       continue;
     }
 
     if (attachment.size > MAX_FILE_BYTES) {
-      warnings.push(`${attachment.name}: skipped (over ${Math.floor(MAX_FILE_BYTES / (1024 * 1024))}MB)`);
+      const limitMb = Math.floor(MAX_FILE_BYTES / (1024 * 1024));
+      warnings.push(
+        `${attachment.name}: skipped — over the ${limitMb}MB per-file limit. Try compressing it, lowering image/video quality, or splitting it (e.g. fewer PDF pages) and resending.`
+      );
       continue;
     }
 
     if (totalBytes + attachment.size > MAX_TOTAL_BYTES) {
-      warnings.push(`${attachment.name}: skipped (message attachment total too large)`);
+      const totalMb = Math.floor(MAX_TOTAL_BYTES / (1024 * 1024));
+      warnings.push(
+        `${attachment.name}: skipped — this message's attachments add up to more than ${totalMb}MB combined. Send this file on its own or split the files across separate messages.`
+      );
       continue;
     }
 
     try {
       const res = await fetch(attachment.url);
       if (!res.ok) {
-        warnings.push(`${attachment.name}: skipped (download failed, HTTP ${res.status})`);
+        warnings.push(
+          `${attachment.name}: skipped — Discord returned an error fetching it (HTTP ${res.status}). Try re-uploading the file and sending again.`
+        );
         continue;
       }
       const buffer = Buffer.from(await res.arrayBuffer());
@@ -127,7 +139,7 @@ export async function buildAttachmentParts(message) {
       count++;
     } catch (err) {
       logError('buildAttachmentParts: download failed', err);
-      warnings.push(`${attachment.name}: skipped (download error)`);
+      warnings.push(`${attachment.name}: skipped — couldn't download it. Try resending, or re-upload if the issue persists.`);
     }
   }
 

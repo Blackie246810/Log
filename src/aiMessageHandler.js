@@ -12,6 +12,7 @@ const TABLE_BLOCK_RE = /```table\s*\n([\s\S]*?)\n```/gi;
 function extractTableImages(text) {
   TABLE_BLOCK_RE.lastIndex = 0;
   const attachments = [];
+  const warnings = [];
 
   // No cap here on purpose: a genuinely large result set is meant to span
   // as many images/messages as it needs (see ai/gemini.js) rather than
@@ -25,6 +26,8 @@ function extractTableImages(text) {
       });
     } catch (err) {
       logError('extractTableImages: malformed table JSON', err);
+      const label = err instanceof Error ? err.message : String(err);
+      warnings.push(`A table the AI tried to show couldn't be rendered (${label}) — ask it to resend that result.`);
     }
   }
 
@@ -33,7 +36,7 @@ function extractTableImages(text) {
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 
-  return { attachments, remainingText };
+  return { attachments, warnings, remainingText };
 }
 
 // Discord allows at most MAX_TABLES_PER_MESSAGE attachments per message —
@@ -107,12 +110,17 @@ export async function handleAiMessage(message) {
 
   try {
     const reply = await askAi(text, message.client.user.username, undefined, attachmentParts, attachmentMeta);
-    const { attachments: tableAttachments, remainingText: afterTables } = extractTableImages(reply);
-    const { attachments: fileAttachments, remainingText } = extractFileAttachments(afterTables);
+    const { attachments: tableAttachments, warnings: tableWarnings, remainingText: afterTables } = extractTableImages(reply);
+    const { attachments: fileAttachments, warnings: fileWarnings, remainingText } = extractFileAttachments(afterTables);
     const attachments = [...tableAttachments, ...fileAttachments];
 
-    const warningFooter = attachmentWarnings.length
-      ? `\n\n-# Skipped: ${attachmentWarnings.join('; ')}`
+    // Incoming-attachment warnings (files skipped on the way in) and
+    // outgoing ones (a table or file the AI tried to send that couldn't be
+    // built) are both "this thing didn't make it, here's why" — reported
+    // the same way rather than the outgoing half silently vanishing.
+    const allWarnings = [...attachmentWarnings, ...tableWarnings, ...fileWarnings];
+    const warningFooter = allWarnings.length
+      ? `\n\n-# Skipped: ${allWarnings.join('; ')}`
       : '';
     const textChunks = splitTextIntoChunks(remainingText + warningFooter, DISCORD_MESSAGE_LIMIT);
     const attachmentChunks = chunkAttachments(attachments);

@@ -49,7 +49,36 @@ function isOwner(userId) {
   return userId === process.env.DISCORD_OWNER_ID;
 }
 
+// Anyone can DM or invoke this bot even though only the owner can actually
+// use it — without a cooldown, a stranger who finds it can trigger an
+// "unauthorized" reply on every single message/interaction, for free,
+// indefinitely. That's a way to burn through this bot's single Discord
+// token's rate limit and to probe that it's alive. One reply per stranger
+// per window is enough to tell them plainly that the bot is private;
+// further attempts in that window are silently ignored instead of answered.
+// Shared by both the messageCreate and interactionCreate rejection paths
+// below, keyed by Discord user id.
+const UNAUTHORIZED_REPLY_COOLDOWN_MS = 5 * 60 * 1000;
+const lastUnauthorizedReplyAt = new Map();
+
+function shouldReplyToUnauthorized(userId) {
+  const now = Date.now();
+  const last = lastUnauthorizedReplyAt.get(userId);
+  if (last !== undefined && now - last < UNAUTHORIZED_REPLY_COOLDOWN_MS) return false;
+  lastUnauthorizedReplyAt.set(userId, now);
+  // Opportunistic cleanup — bounds the map instead of letting it grow
+  // forever if many different strangers interact with the bot over its
+  // lifetime.
+  if (lastUnauthorizedReplyAt.size > 1000) {
+    for (const [id, ts] of lastUnauthorizedReplyAt) {
+      if (now - ts >= UNAUTHORIZED_REPLY_COOLDOWN_MS) lastUnauthorizedReplyAt.delete(id);
+    }
+  }
+  return true;
+}
+
 async function rejectUnauthorized(interaction) {
+  if (!shouldReplyToUnauthorized(interaction.user.id)) return;
   const payload = { content: 'You are not authorized for this action.', flags: 64 };
   try {
     if (interaction.isModalSubmit() || interaction.isButton() || interaction.isChatInputCommand()) {
@@ -137,9 +166,12 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
+// Anyone can DM this bot even though only the owner can actually use it —
+// non-owner attempts are rate-limited via shouldReplyToUnauthorized above.
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
   if (message.author.id !== process.env.DISCORD_OWNER_ID) {
+    if (!shouldReplyToUnauthorized(message.author.id)) return;
     try {
       await message.reply('You are not authorized for this action.');
     } catch (err) {
