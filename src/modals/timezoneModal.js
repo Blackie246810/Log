@@ -2,7 +2,7 @@ import { setTimezone } from '../constantsStore.js';
 import { TIMEZONES, canonicalTimezone } from '../timezoneList.js';
 import { closestMatches } from '../fuzzyMatch.js';
 import { replyInChunks } from '../chunkedReply.js';
-import { logError } from '../errorReporter.js';
+import { logError, errorDetail } from '../errorReporter.js';
 
 export const customId = 'timezone-modal';
 
@@ -15,7 +15,7 @@ export async function handle(interaction) {
       await setTimezone(exact);
     } catch (err) {
       logError('timezone-modal DB write', err);
-      await interaction.reply({ content: 'Database error — timezone was not updated. Check the console for details.' });
+      await interaction.reply({ content: `Database error — timezone was not updated. ${errorDetail(err)}` });
       return;
     }
     await interaction.reply({ content: `Timezone set to ${exact}.` });

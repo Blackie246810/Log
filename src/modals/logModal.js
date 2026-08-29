@@ -3,7 +3,7 @@ import { addLogEntry } from '../db.js';
 import { CATEGORIES, PAYMENT_MODES, PAYMENT_FLOWS, matchCanonical, parseDateTimeDDMMYYYY } from '../constants.js';
 import { getCurrency, getTimezone } from '../constantsStore.js';
 import { buildLogEmbed } from '../embeds.js';
-import { logError } from '../errorReporter.js';
+import { logError, errorDetail } from '../errorReporter.js';
 
 export const customId = 'log-modal';
 
@@ -72,7 +72,7 @@ export async function handle(interaction) {
     });
   } catch (err) {
     logError('log-modal DB write', err);
-    await interaction.reply({ content: 'Database error — nothing was written. Check the console for details.' });
+    await interaction.reply({ content: `Database error — nothing was written. ${errorDetail(err)}` });
     return;
   }
 

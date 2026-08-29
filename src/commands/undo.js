@@ -1,7 +1,7 @@
 import { SlashCommandBuilder, EmbedBuilder, InteractionContextType } from 'discord.js';
 import { undoLastEntry } from '../db.js';
 import { getCurrency } from '../constantsStore.js';
-import { logError } from '../errorReporter.js';
+import { logError, errorDetail } from '../errorReporter.js';
 
 export const data = new SlashCommandBuilder()
   .setName('undo')
@@ -34,6 +34,6 @@ export async function execute(interaction) {
     await interaction.reply({ embeds: [embed] });
   } catch (err) {
     logError('undo command', err);
-    await interaction.reply({ content: 'Failed to undo. Check the console for details.' });
+    await interaction.reply({ content: `Failed to undo — ${errorDetail(err)}` });
   }
 }

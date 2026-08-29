@@ -1,5 +1,5 @@
 import { deleteLogById } from '../db.js';
-import { logError } from '../errorReporter.js';
+import { logError, errorDetail } from '../errorReporter.js';
 
 export const customIdPrefix = 'delete-confirm:';
 
@@ -17,7 +17,7 @@ export async function handle(interaction) {
       result = await deleteLogById(logId);
     } catch (err) {
       logError('delete-confirm DB write', err);
-      await interaction.update({ content: `Database error — entry #${logId} was NOT deleted. Check the console for details.`, embeds: [], components: [] });
+      await interaction.update({ content: `Database error — entry #${logId} was NOT deleted. ${errorDetail(err)}`, embeds: [], components: [] });
       return;
     }
 

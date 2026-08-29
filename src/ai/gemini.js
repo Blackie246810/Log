@@ -4,10 +4,78 @@ import { CATEGORIES } from '../constants.js';
 import { getConversationHistory, saveConversationHistory, clearConversationHistory } from '../db.js';
 import { MAX_TABLES_PER_MESSAGE } from '../tableImage.js';
 import { getCurrency, getTimezone } from '../constantsStore.js';
+import { logError } from '../errorReporter.js';
 
 const MODEL = 'gemini-3.6-flash';
 const MAX_HISTORY_TURNS = 500;
 const MAX_TOOL_HOPS = 5;
+
+// --- Gemini API key rotation --------------------------------------------
+// GEMINI_API_KEYS holds one or more keys, comma or newline separated. When
+// a request fails because the *current* key is rate-limited/exhausted/
+// invalid, we rotate to the next key and retry — instead of surfacing that
+// as a user-facing error immediately.
+const API_KEYS = (process.env.GEMINI_API_KEYS ?? '')
+  .split(/[,\n]/)
+  .map((key) => key.trim())
+  .filter(Boolean);
+
+if (API_KEYS.length === 0) {
+  throw new Error('No Gemini API key configured — set GEMINI_API_KEYS (comma-separated).');
+}
+
+let activeKeyIndex = 0;
+const clientsByKey = new Map();
+
+function maskKey(key) {
+  return key.length <= 8 ? '****' : `${key.slice(0, 4)}...${key.slice(-4)}`;
+}
+
+function clientForKey(key) {
+  if (!clientsByKey.has(key)) {
+    clientsByKey.set(key, new GoogleGenAI({ apiKey: key }));
+  }
+  return clientsByKey.get(key);
+}
+
+function rotateKey() {
+  activeKeyIndex = (activeKeyIndex + 1) % API_KEYS.length;
+}
+
+// Recognizes the class of error that means "this specific key is done" —
+// quota/rate-limit exhaustion or the key itself being invalid/unauthorized —
+// as opposed to an unrelated failure (bad request, network hiccup, etc.)
+// that would just fail again on any key.
+function isKeyExhaustedError(err) {
+  const status = err?.status ?? err?.code ?? err?.httpStatus;
+  if ([429, 401, 403].includes(Number(status))) return true;
+
+  const message = String(err?.message ?? err ?? '');
+  return /RESOURCE_EXHAUSTED|PERMISSION_DENIED|UNAUTHENTICATED|quota|rate.?limit|API key not valid|API_KEY_INVALID/i.test(message);
+}
+
+// Runs a Gemini call against the currently active key. On a key-exhausted
+// error it rotates to the next key and retries, up to once per configured
+// key, before finally giving up and letting the error surface normally.
+async function withKeyRotation(fn) {
+  const attempts = API_KEYS.length;
+  let lastErr;
+
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const key = API_KEYS[activeKeyIndex];
+    try {
+      return await fn(clientForKey(key));
+    } catch (err) {
+      lastErr = err;
+      if (!isKeyExhaustedError(err)) throw err;
+
+      logError(`gemini: key ${maskKey(key)} exhausted/invalid, rotating`, err);
+      if (attempts > 1) rotateKey();
+    }
+  }
+
+  throw lastErr;
+}
 
 function buildSystemInstruction(botName) {
   const identity = botName ? `You are ${botName}, ` : 'You are ';
@@ -21,7 +89,7 @@ function buildSystemInstruction(botName) {
 
     `Every entry gets a numeric ID (e.g. #123), which /edit and /delete use to target a specific entry. All of this — every modal, button, and confirmation — is entirely separate from you: you cannot trigger any of it yourself, you can only read data via query_data. If asked to log, edit, delete, or undo something, tell the user which command to run instead of claiming to have done it.`,
 
-    `Data: table logs (logs every transaction, each with its own Timezone) and balances (running balance after each transaction, each with its own Currency — a 3-letter ISO code, e.g. USD). Amounts are always stored positive — type (income/expense) sets the sign, sum accordingly. Currency and timezone can change over time via owner commands, so a result spanning multiple currencies must be labelled per-row, not assumed uniform — never just prefix a single symbol over everything. The live/current currency is ${getCurrency()} and timezone is ${getTimezone()}, used for "now"-relative questions and any answer not tied to older rows. Valid categories: ${CATEGORIES.join(', ')}. `,
+    `Data: table logs (logs every transaction, each with its own Timezone), balances (running balance after each transaction, each with its own Currency — a 3-letter ISO code, e.g. USD), and constants (single row holding the current live currency/timezone). Amounts are always stored positive — type (income/expense) sets the sign, sum accordingly. Currency and timezone can change over time via owner commands, so a result spanning multiple currencies must be labelled per-row, not assumed uniform — never just prefix a single symbol over everything. The live/current currency is ${getCurrency()} and timezone is ${getTimezone()}, used for "now"-relative questions and any answer not tied to older rows (querying constants directly will always match this). Valid categories: ${CATEGORIES.join(', ')}. `,
 
     `Before answering from results: confirm you selected what was actually asked (right table/filter/aggregate), recompute totals yourself rather than trusting them blindly, and re-query instead of rationalizing an answer that looks off (empty, huge, negative where impossible). State assumptions (e.g. "this month" = calendar month).`,
 
@@ -43,14 +111,6 @@ function buildSystemInstruction(botName) {
 
     `Ensure accuracy, precision and validity when presenting and talking about the financial data - that is the most important part of you`
   ].join('\n\n');
-}
-
-let defaultClient = null;
-function getDefaultClient() {
-  if (!defaultClient) {
-    defaultClient = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-  }
-  return defaultClient;
 }
 
 function currentDateContext() {
@@ -84,7 +144,9 @@ function sanitizeUserPartsForHistory(parts, attachmentMeta) {
   });
 }
 
-export async function askAi(userMessage, botName, client = getDefaultClient(), attachmentParts = [], attachmentMeta = []) {
+// `client` is an optional override (e.g. for tests) that bypasses key
+// rotation entirely and is used as-is; leave it unset for normal operation.
+export async function askAi(userMessage, botName, client, attachmentParts = [], attachmentMeta = []) {
   const history = await getConversationHistory();
 
   const userParts = [];
@@ -98,7 +160,7 @@ export async function askAi(userMessage, botName, client = getDefaultClient(), a
   while (hops < MAX_TOOL_HOPS) {
     hops++;
 
-    const response = await client.models.generateContent({
+    const requestParams = {
       model: MODEL,
       contents,
       config: {
@@ -106,7 +168,11 @@ export async function askAi(userMessage, botName, client = getDefaultClient(), a
         tools: [{ functionDeclarations: toolDeclarations }],
         thinkingConfig: { thinkingLevel: 'medium' },
       },
-    });
+    };
+
+    const response = client
+      ? await client.models.generateContent(requestParams)
+      : await withKeyRotation((activeClient) => activeClient.models.generateContent(requestParams));
 
     const calls = response.functionCalls;
     if (!calls || calls.length === 0) {

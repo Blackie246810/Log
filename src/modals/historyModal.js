@@ -1,7 +1,7 @@
 import { EmbedBuilder } from 'discord.js';
 import { getRecentHistory } from '../db.js';
 import { formatDateTimeDDMMYYYY } from '../constants.js';
-import { logError } from '../errorReporter.js';
+import { logError, errorDetail } from '../errorReporter.js';
 
 export const customId = 'history-modal';
 
@@ -45,6 +45,6 @@ export async function handle(interaction) {
     await interaction.reply({ embeds: [embed] });
   } catch (err) {
     logError('history command', err);
-    await interaction.reply({ content: 'Failed to fetch history. Check the console for details.' });
+    await interaction.reply({ content: `Failed to fetch history — ${errorDetail(err)}` });
   }
 }

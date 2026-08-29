@@ -2,7 +2,7 @@ import { AttachmentBuilder } from 'discord.js';
 import ExcelJS from 'exceljs';
 import { getLogsBetween } from '../db.js';
 import { parseDateStartOfDay, parseDateEndOfDay, defaultFileFromDate, FILE_EXPORT_EPOCH, todayDDMMYYYY, formatDateTimeDDMMYYYY } from '../constants.js';
-import { logError } from '../errorReporter.js';
+import { logError, errorDetail } from '../errorReporter.js';
 
 export const customId = 'file-modal';
 
@@ -67,7 +67,7 @@ export async function handle(interaction) {
     rows = await getLogsBetween(fromDate, toDate);
   } catch (err) {
     logError('file-modal DB read', err);
-    await interaction.editReply({ content: 'Database error while building the export. Check the console for details.' });
+    await interaction.editReply({ content: `Database error while building the export — ${errorDetail(err)}` });
     return;
   }
 

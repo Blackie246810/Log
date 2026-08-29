@@ -1,6 +1,6 @@
 import { setLogNote, getLogById, getCurrentBalance } from '../db.js';
 import { buildLogEmbed } from '../embeds.js';
-import { logError } from '../errorReporter.js';
+import { logError, errorDetail } from '../errorReporter.js';
 
 export const customIdPrefix = 'log-note-modal:';
 
@@ -13,7 +13,7 @@ export async function handle(interaction) {
     saved = await setLogNote(logId, note);
   } catch (err) {
     logError('note-modal DB write', err);
-    await interaction.reply({ content: `Entry #${logId} was logged, but saving the note failed — check the console.` });
+    await interaction.reply({ content: `Entry #${logId} was logged, but saving the note failed — ${errorDetail(err)}` });
     return;
   }
 

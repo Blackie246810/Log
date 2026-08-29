@@ -1,7 +1,7 @@
 import { ButtonBuilder, ButtonStyle, ActionRowBuilder } from 'discord.js';
 import { getLogById } from '../db.js';
 import { buildLogEmbed } from '../embeds.js';
-import { logError } from '../errorReporter.js';
+import { logError, errorDetail } from '../errorReporter.js';
 
 export const customId = 'delete-modal';
 
@@ -20,7 +20,7 @@ export async function handle(interaction) {
     log = await getLogById(rawId);
   } catch (err) {
     logError('delete-modal lookup', err);
-    await interaction.reply({ content: 'Database error while looking up that entry. Check the console for details.' });
+    await interaction.reply({ content: `Database error while looking up that entry — ${errorDetail(err)}` });
     return;
   }
 

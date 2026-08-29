@@ -25,7 +25,7 @@ import * as logNoteButton from './buttons/logNoteButton.js';
 import * as deleteConfirmButton from './buttons/deleteConfirmButton.js';
 import * as editConfirmButton from './buttons/editConfirmButton.js';
 import * as editStartButton from './buttons/editStartButton.js';
-import { logError, reportError } from './errorReporter.js';
+import { logError, reportError, errorDetail } from './errorReporter.js';
 import { startHealthServer } from './health.js';
 import { handleAiMessage } from './aiMessageHandler.js';
 import { loadConstants } from './constantsStore.js';
@@ -124,7 +124,7 @@ client.on('interactionCreate', async (interaction) => {
     }
   } catch (err) {
     logError(`interaction:${interaction.type}`, err);
-    const payload = { content: 'Something went wrong handling that. Check the console for details.' };
+    const payload = { content: `Something went wrong handling that — ${errorDetail(err)}` };
     try {
       if (interaction.replied || interaction.deferred) {
         await interaction.followUp(payload);
@@ -151,6 +151,11 @@ client.on('messageCreate', async (message) => {
     await handleAiMessage(message);
   } catch (err) {
     logError('messageCreate', err);
+    try {
+      await message.reply(`Something went wrong — ${errorDetail(err)}`);
+    } catch (replyErr) {
+      await reportError(client, 'messageCreate error-reply failed', replyErr);
+    }
   }
 });
 

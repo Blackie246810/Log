@@ -1,5 +1,5 @@
 import { SlashCommandBuilder, InteractionContextType } from 'discord.js';
-import { logError } from '../errorReporter.js';
+import { logError, errorDetail } from '../errorReporter.js';
 
 export const data = new SlashCommandBuilder()
   .setName('clear')
@@ -48,6 +48,6 @@ export async function execute(interaction) {
     });
   } catch (err) {
     logError('clear command', err);
-    await interaction.editReply({ content: 'Something went wrong while clearing messages. Check the console for details.' });
+    await interaction.editReply({ content: `Something went wrong while clearing messages — ${errorDetail(err)}` });
   }
 }

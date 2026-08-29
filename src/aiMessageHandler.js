@@ -1,6 +1,6 @@
 import { AttachmentBuilder } from 'discord.js';
 import { askAi } from './ai/gemini.js';
-import { logError } from './errorReporter.js';
+import { logError, errorDetail } from './errorReporter.js';
 import { renderTableImages, MAX_TABLES_PER_MESSAGE } from './tableImage.js';
 import { buildAttachmentParts } from './ai/attachments.js';
 import { extractFileAttachments } from './ai/outgoingFiles.js';
@@ -141,7 +141,7 @@ export async function handleAiMessage(message) {
     }
   } catch (err) {
     logError('ai message handler', err);
-    await placeholder.edit('Something went wrong asking the AI. Check the console for details.');
+    await placeholder.edit(`Something went wrong asking the AI — ${errorDetail(err)}`);
   } finally {
     clearInterval(typingInterval);
   }

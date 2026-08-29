@@ -1,6 +1,6 @@
 import { editLogById, getLogById, getCurrentBalance } from '../db.js';
 import { buildLogEmbed } from '../embeds.js';
-import { logError } from '../errorReporter.js';
+import { logError, errorDetail } from '../errorReporter.js';
 import { getPendingEdit, clearPendingEdit } from '../pendingEdits.js';
 
 export const customIdPrefix = 'edit-note-modal:';
@@ -31,7 +31,7 @@ export async function handle(interaction) {
     });
   } catch (err) {
     logError('edit-note-modal DB write', err);
-    await interaction.reply({ content: `Database error — entry #${logId} was NOT updated. Check the console for details.` });
+    await interaction.reply({ content: `Database error — entry #${logId} was NOT updated. ${errorDetail(err)}` });
     return;
   }
 

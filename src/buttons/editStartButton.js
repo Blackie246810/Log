@@ -1,7 +1,7 @@
 import { ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder } from 'discord.js';
 import { getLogById } from '../db.js';
 import { formatDateTimeDDMMYYYY } from '../constants.js';
-import { logError } from '../errorReporter.js';
+import { logError, errorDetail } from '../errorReporter.js';
 
 export const customIdPrefix = 'edit-start:';
 
@@ -22,7 +22,7 @@ export async function handle(interaction) {
     log = await getLogById(logId);
   } catch (err) {
     logError('edit-start lookup', err);
-    await interaction.reply({ content: 'Database error while looking up that entry. Check the console for details.' });
+    await interaction.reply({ content: `Database error while looking up that entry — ${errorDetail(err)}` });
     return;
   }
 

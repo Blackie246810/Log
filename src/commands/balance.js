@@ -1,7 +1,7 @@
 import { SlashCommandBuilder, EmbedBuilder, InteractionContextType } from 'discord.js';
 import { getCurrentBalance } from '../db.js';
 import { getCurrency } from '../constantsStore.js';
-import { logError } from '../errorReporter.js';
+import { logError, errorDetail } from '../errorReporter.js';
 
 export const data = new SlashCommandBuilder()
   .setName('balance')
@@ -24,6 +24,6 @@ export async function execute(interaction) {
     await interaction.reply({ embeds: [embed] });
   } catch (err) {
     logError('balance command', err);
-    await interaction.reply({ content: 'Failed to fetch balance. Check the console for details.' });
+    await interaction.reply({ content: `Failed to fetch balance — ${errorDetail(err)}` });
   }
 }

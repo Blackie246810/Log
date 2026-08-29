@@ -1,7 +1,7 @@
 import { ButtonBuilder, ButtonStyle, ActionRowBuilder, EmbedBuilder } from 'discord.js';
 import { getLogById } from '../db.js';
 import { CATEGORIES, PAYMENT_MODES, PAYMENT_FLOWS, matchCanonical, parseDateTimeDDMMYYYY, formatDateTimeDDMMYYYY } from '../constants.js';
-import { logError } from '../errorReporter.js';
+import { logError, errorDetail } from '../errorReporter.js';
 import { setPendingEdit } from '../pendingEdits.js';
 
 export const customIdPrefix = 'edit-fields-modal:';
@@ -18,7 +18,7 @@ export async function handle(interaction) {
     original = await getLogById(logId);
   } catch (err) {
     logError('edit-fields-modal lookup', err);
-    await interaction.reply({ content: 'Database error while looking up that entry. Check the console for details.' });
+    await interaction.reply({ content: `Database error while looking up that entry — ${errorDetail(err)}` });
     return;
   }
   if (!original) {
