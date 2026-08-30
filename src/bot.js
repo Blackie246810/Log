@@ -29,6 +29,7 @@ import * as editStartButton from './buttons/editStartButton.js';
 import { logError, reportError, errorDetail } from './errorReporter.js';
 import { startHealthServer } from './health.js';
 import { handleAiMessage } from './aiMessageHandler.js';
+import { validateGeminiKeys } from './ai/gemini.js';
 import { loadConstants } from './constantsStore.js';
 import { startDailyConversationReset } from './conversationReset.js';
 
@@ -98,6 +99,29 @@ client.once('clientReady', async () => {
   } catch (err) {
     logError('startup: loadConstants failed', err);
   }
+
+  // Ping every configured Gemini key now, once, rather than finding out a
+  // key is bad the first time a real DM happens to land on it. Always
+  // logged; only DMs the owner if something actually needs attention, so
+  // a normal restart with healthy keys stays quiet.
+  try {
+    const { ok, summary, report } = await validateGeminiKeys();
+    console.log(`[startup] ${summary}`);
+    if (!ok) {
+      const ownerId = process.env.DISCORD_OWNER_ID;
+      if (ownerId) {
+        try {
+          const owner = await client.users.fetch(ownerId);
+          await owner.send(`⚠️ **Gemini key check on startup**\n${report}`);
+        } catch (dmErr) {
+          logError('startup: failed to DM key check report', dmErr);
+        }
+      }
+    }
+  } catch (err) {
+    logError('startup: validateGeminiKeys failed', err);
+  }
+
   const port = Number(process.env.PORT) || Number(process.env.HEALTH_PORT) || 3000;
   startHealthServer(client, port);
   startDailyConversationReset();

@@ -4,7 +4,7 @@ import { CATEGORIES } from '../constants.js';
 import { getConversationHistory, saveConversationHistory, clearConversationHistory, getMemories } from '../db.js';
 import { MAX_TABLES_PER_MESSAGE } from '../tableImage.js';
 import { getCurrency, getTimezone } from '../constantsStore.js';
-import { logError } from '../errorReporter.js';
+import { logError, describeError } from '../errorReporter.js';
 
 const MODEL = 'gemini-3.6-flash';
 // Conversation history is no longer trimmed to a fixed turn count — it's
@@ -16,21 +16,93 @@ const HISTORY_SAFETY_CAP_MESSAGES = 4000;
 const MAX_TOOL_HOPS = 10;
 
 // --- Gemini API key rotation --------------------------------------------
-// GEMINI_API_KEYS holds one or more keys, comma or newline separated. When
-// a request fails because the *current* key is rate-limited/exhausted/
-// invalid, we rotate to the next key and retry — instead of surfacing that
-// as a user-facing error immediately.
-const API_KEYS = (process.env.GEMINI_API_KEYS ?? '')
-  .split(/[,\n]/)
-  .map((key) => key.trim())
-  .filter(Boolean);
+// Keys can be supplied two ways, and both are read and merged:
+//
+//   1. GEMINI_API_KEY_<n> (GEMINI_API_KEY_1, GEMINI_API_KEY_2, ...) — one
+//      key per env var. THIS IS THE RECOMMENDED WAY TO ADD A KEY: create
+//      one new env var on Render with the next number and redeploy.
+//      Because each key lives in its own var, adding one can never
+//      corrupt another — which is exactly what happens with option 2
+//      below if a new key gets pasted in without a separating comma: the
+//      two keys silently merge into one garbage string that Google
+//      rejects with a 401 that has nothing to do with quota and nothing
+//      to do with the key actually being bad.
+//   2. GEMINI_API_KEYS — comma/newline separated list (legacy/bulk-import
+//      path; still supported, just more error-prone to edit by hand).
+//
+// When a request fails because the *current* key is rate-limited/
+// exhausted/invalid, we rotate to the next key and retry — instead of
+// surfacing that as a user-facing error immediately.
+function readNumberedKeyVars() {
+  const pattern = /^GEMINI_API_KEY_(\d+)$/;
+  return Object.keys(process.env)
+    .map((name) => {
+      const match = name.match(pattern);
+      return match ? { label: name, order: Number(match[1]), raw: process.env[name] } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.order - b.order);
+}
+
+function readListKeyVar() {
+  return (process.env.GEMINI_API_KEYS ?? '')
+    .split(/[,\n]/)
+    .map((raw, i) => ({ label: `GEMINI_API_KEYS[${i}]`, raw }));
+}
+
+// Strips characters that commonly survive a copy-paste (surrounding
+// straight or smart quotes, stray whitespace) so a key pasted with its
+// quotation marks intact still works, instead of failing for a reason
+// that has nothing to do with the key itself.
+function cleanKey(raw) {
+  return (raw ?? '').trim().replace(/^['"“”]+|['"“”]+$/g, '');
+}
+
+// A real Gemini API key is one short token — currently ~39 chars for
+// "AIza..." keys, somewhat more for the newer "AQ." ones. Anything far
+// longer almost always means two keys got concatenated with no separator
+// between them (see the comment above). This is flagged, not dropped —
+// better to try it and get a clear reason logged than to silently exclude
+// something that just happens to be long.
+const SUSPICIOUSLY_LONG_KEY_CHARS = 100;
+
+const keyLabels = new Map(); // key value -> which env var it came from, for logs/DMs
+const API_KEYS = [];
+{
+  const seen = new Set();
+  for (const entry of [...readNumberedKeyVars(), ...readListKeyVar()]) {
+    const key = cleanKey(entry.raw);
+    if (!key || seen.has(key)) continue; // empty slots, and accidental duplicates across the two sources
+    seen.add(key);
+    API_KEYS.push(key);
+    keyLabels.set(key, entry.label);
+    if (key.length > SUSPICIOUSLY_LONG_KEY_CHARS) {
+      console.warn(`[gemini] ${entry.label} is ${key.length} chars — much longer than a normal Gemini key. This usually means two keys got pasted together without a comma/newline between them. Double check it in AI Studio.`);
+    }
+  }
+}
 
 if (API_KEYS.length === 0) {
-  throw new Error('No Gemini API key configured — set GEMINI_API_KEYS (comma-separated).');
+  throw new Error('No Gemini API key configured — set GEMINI_API_KEY_1 (recommended, add more as GEMINI_API_KEY_2, _3, ...) or GEMINI_API_KEYS (comma-separated).');
 }
 
 let activeKeyIndex = 0;
 const clientsByKey = new Map();
+
+// Keys that failed with a genuine auth/permission error — not a quota hit
+// — are parked here for the rest of this process's life. Unlike the RPM/
+// TPM/RPD cooldowns below, these don't expire on their own: a key Google
+// has rejected outright (invalid, revoked, or blocked at the project
+// level) needs a human to fix it in AI Studio, so there's nothing to wait
+// out. Skipping them here means a bad key costs one wasted call (the one
+// that discovers it), not one every single rotation cycle forever.
+// Populated by validateGeminiKeys() at startup and live by withKeyRotation
+// if one slips through. Value is the human-readable reason, for reporting.
+const permanentlyInvalidKeys = new Map(); // key -> reason string
+
+function describeKey(key) {
+  return `${keyLabels.get(key) ?? '?'} (${maskKey(key)})`;
+}
 
 // Per-key cooldown tracking for RPM/RPD quota hits, so we can warn "N% of
 // your keys are currently rate-limited" instead of just silently rotating.
@@ -138,6 +210,15 @@ function isKeyExhaustedError(err) {
 
   const message = String(err?.message ?? err ?? '');
   return /RESOURCE_EXHAUSTED|PERMISSION_DENIED|UNAUTHENTICATED|quota|rate.?limit|API key not valid|API_KEY_INVALID/i.test(message);
+}
+
+// True for the auth/permission status codes (401/403) specifically — as
+// opposed to 429, which is always a quota hit and always transient. Used
+// to decide whether a failure belongs in permanentlyInvalidKeys rather
+// than one of the cooldown maps below.
+function isAuthStatus(err) {
+  const status = Number(err?.status ?? err?.code ?? err?.httpStatus);
+  return status === 401 || status === 403;
 }
 
 // Recognizes Gemini's "your request (history + system instruction + this
@@ -272,11 +353,26 @@ function buildGroundingSourcesFooter(response) {
 // if provided, fires whenever a key gets marked exhausted for a
 // recognized RPM/RPD quota.
 async function withKeyRotation(fn, onLimitHit) {
-  const attempts = API_KEYS.length;
+  if (permanentlyInvalidKeys.size >= API_KEYS.length) {
+    throw new Error(
+      `All ${API_KEYS.length} configured Gemini API key(s) are marked invalid (checked at startup or during earlier calls this run). ` +
+      `Check GET /health for the reasons, fix the keys in AI Studio, then restart.`
+    );
+  }
+
   let lastErr;
 
-  for (let attempt = 0; attempt < attempts; attempt++) {
+  // Bounded by the total key count — a safe upper bound whether or not
+  // some of those iterations end up just skipping a known-bad key rather
+  // than actually calling out.
+  for (let attempt = 0; attempt < API_KEYS.length; attempt++) {
     const key = API_KEYS[activeKeyIndex];
+
+    if (permanentlyInvalidKeys.has(key)) {
+      rotateKey();
+      continue;
+    }
+
     try {
       return await fn(clientForKey(key), key);
     } catch (err) {
@@ -287,14 +383,62 @@ async function withKeyRotation(fn, onLimitHit) {
       if (limitType) {
         markKeyExhausted(key, limitType);
         onLimitHit?.(limitType);
+      } else if (isAuthStatus(err)) {
+        // Not a recognized quota message but still a 401/403 — this is
+        // Google rejecting the key/project itself, not a "try again
+        // later" situation. Park it so future calls skip straight past.
+        const reason = describeError(err).message;
+        permanentlyInvalidKeys.set(key, reason);
+        logError(`gemini: ${describeKey(key)} looks permanently invalid (${reason}) — parking it for the rest of this run`, err);
       }
 
-      logError(`gemini: key ${maskKey(key)} exhausted/invalid, rotating`, err);
-      if (attempts > 1) rotateKey();
+      logError(`gemini: ${describeKey(key)} exhausted/invalid, rotating`, err);
+      if (API_KEYS.length > 1) rotateKey();
     }
   }
 
-  throw lastErr;
+  throw lastErr ?? new Error('No usable Gemini API key available.');
+}
+
+// Pings every configured key with the cheapest possible call — listing
+// models, not generating content — so it costs no RPM/RPD generation
+// quota. Run this once at startup (see bot.js) so a bad key is caught
+// and reported clearly at boot, instead of being discovered live via a
+// confusing 401 the next time it happens to be that key's turn to answer
+// a real message. Also feeds permanentlyInvalidKeys directly, so a key
+// that fails here is skipped by withKeyRotation from the very first call.
+export async function validateGeminiKeys() {
+  const results = await Promise.all(
+    API_KEYS.map(async (key) => {
+      try {
+        await clientForKey(key).models.list({ config: { pageSize: 1 } });
+        return { label: describeKey(key), ok: true };
+      } catch (err) {
+        const reason = describeError(err).message;
+        if (isAuthStatus(err)) permanentlyInvalidKeys.set(key, reason);
+        return { label: describeKey(key), ok: false, reason };
+      }
+    })
+  );
+
+  const bad = results.filter((r) => !r.ok);
+  const summary = `Gemini keys: ${results.length - bad.length}/${results.length} valid at startup.`;
+  const lines = [summary, ...bad.map((r) => `❌ ${r.label}: ${r.reason}`)];
+  return { ok: bad.length === 0, summary, report: lines.join('\n') };
+}
+
+// Snapshot for the /health endpoint — cheap, synchronous, no network call.
+// Reflects whatever validateGeminiKeys/withKeyRotation have learned so
+// far this run, not a fresh check.
+export function getKeyPoolStatus() {
+  return {
+    total: API_KEYS.length,
+    invalid: API_KEYS.filter((k) => permanentlyInvalidKeys.has(k)).length,
+    invalidKeys: [...permanentlyInvalidKeys.entries()].map(([key, reason]) => ({
+      label: describeKey(key),
+      reason,
+    })),
+  };
 }
 
 // Renders the Memories table into a compact block for the system
