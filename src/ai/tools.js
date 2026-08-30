@@ -1,4 +1,4 @@
-import { runReadOnlyQuery } from '../db.js';
+import { runReadOnlyQuery, upsertMemory, deleteMemory } from '../db.js';
 import { buildSelectQuery, ALLOWED_TABLES, allowedColumnsFor } from './queryBuilder.js';
 
 export const toolDeclarations = [
@@ -86,6 +86,37 @@ export const toolDeclarations = [
       required: ['table', 'select'],
     },
   },
+  {
+    name: 'remember_fact',
+    description:
+      `Save or update one durable fact about the user for future conversations — the kind of thing worth still knowing after this conversation's history has rolled off (a preference, a recurring context, a temporary situation worth tracking for a while). NOT for anything already sitting in logs/balances/constants — never duplicate query_data's job. ` +
+      `Facts the user states directly to you in conversation can be saved right away, no extra step needed. Facts you merely noticed inside an uploaded file's content (a receipt, statement, spreadsheet, screenshot, etc.) are different: surface the specific detail to the user as a plain question first (e.g. "I noticed X in that file — want me to remember that?") and only call this tool after they clearly say yes in a reply. Never call remember_fact for a document-derived detail in the same turn you first mention noticing it. ` +
+      `Regardless of source or consent, never save financial account numbers, card numbers, government ID numbers, or any other sensitive identifier — this store is plain text resent on every message, not a secure vault, and consent doesn't change that; decline to save these even if asked. ` +
+      `Writing to an existing key OVERWRITES it — always reuse the same key when updating a fact rather than inventing a new one for the same topic (e.g. always "travel_status", never "travel_status_2"), so this stays a small set of current facts, not an accumulating log. ` +
+      `Keep value short: one fact, one plain short sentence, hard-capped at 300 characters (anything longer is silently truncated to fit) — this table is resent in full on every single message, so terse and factual beats descriptive every time. ` +
+      `Set expires_at only for genuinely temporary things (e.g. "traveling until a date", "on a diet this month") — omit it for facts that are just generally true going forward.`,
+    parametersJsonSchema: {
+      type: 'object',
+      properties: {
+        key: { type: 'string', description: 'Short, stable slug identifying this fact (e.g. "travel_status", "spending_style"). Reuse the same key to update rather than duplicate.' },
+        value: { type: 'string', description: 'The fact itself, in a short, plain sentence.' },
+        category: { type: 'string', description: 'Optional freeform grouping label (e.g. "preference", "context").' },
+        expires_at: { type: 'string', description: 'Optional ISO date/time after which this fact is no longer relevant and will be forgotten automatically. Omit for durable facts.' },
+      },
+      required: ['key', 'value'],
+    },
+  },
+  {
+    name: 'forget_fact',
+    description: 'Delete a previously remembered fact by its key — use when the user asks to forget something, or when a fact you saved is no longer true and there is no natural replacement value to overwrite it with instead.',
+    parametersJsonSchema: {
+      type: 'object',
+      properties: {
+        key: { type: 'string', description: 'The key of the fact to remove.' },
+      },
+      required: ['key'],
+    },
+  },
 ];
 
 export async function callTool(name, args = {}) {
@@ -93,6 +124,20 @@ export async function callTool(name, args = {}) {
     case 'query_data': {
       const { sql, params } = buildSelectQuery(args);
       return runReadOnlyQuery(sql, params);
+    }
+
+    case 'remember_fact': {
+      const { key, value, category, expires_at: expiresAt } = args;
+      if (!key || !value) throw new Error('remember_fact requires both key and value.');
+      const { key: savedKey, truncated } = await upsertMemory({ key, value, category, expiresAt });
+      return { saved: true, key: savedKey, truncated };
+    }
+
+    case 'forget_fact': {
+      const { key } = args;
+      if (!key) throw new Error('forget_fact requires a key.');
+      const deleted = await deleteMemory(key);
+      return { deleted };
     }
 
     default:

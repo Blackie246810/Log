@@ -395,6 +395,72 @@ export async function runReadOnlyQuery(sql, params) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Memories — small, curated, long-lived facts the AI keeps about the user,
+// separate from the raw turn-by-turn Conversations history. Overwrite-by-key
+// keeps this bounded and self-current (updating a fact replaces it instead
+// of piling up a new row), and MAX_MEMORY_ROWS is a hard backstop so this
+// table can never grow large enough to meaningfully bloat the per-message
+// system instruction it gets injected into, even if the model itself is
+// sloppy about pruning. Expired rows are swept on every read.
+//
+// Keys are normalized (trimmed + lowercased) before every read/write/delete
+// so that "Travel_Status" and "travel_status" are treated as the exact same
+// fact instead of silently becoming two rows that can drift out of sync —
+// the whole point of overwrite-by-key depends on the AI's own casing
+// choices never being able to defeat it.
+// ---------------------------------------------------------------------------
+
+const MAX_MEMORY_ROWS = 40;
+const MAX_MEMORY_VALUE_LENGTH = 300;
+
+function normalizeMemoryKey(key) {
+  return String(key ?? '').trim().toLowerCase();
+}
+
+export async function getMemories() {
+  await pool.query(`DELETE FROM "Memories" WHERE "Expires at" IS NOT NULL AND "Expires at" <= now()`);
+  const { rows } = await pool.query(
+    `SELECT "Key" AS "key", "Value" AS "value", "Category" AS "category", "Expires at" AS "expiresAt", "Updated at" AS "updatedAt"
+     FROM "Memories" ORDER BY "Updated at" DESC`
+  );
+  return rows;
+}
+
+export async function upsertMemory({ key, value, category, expiresAt }) {
+  const normalizedKey = normalizeMemoryKey(key);
+  if (!normalizedKey) throw new Error('Memory key cannot be empty.');
+
+  const truncated = value.length > MAX_MEMORY_VALUE_LENGTH;
+  const boundedValue = truncated ? value.slice(0, MAX_MEMORY_VALUE_LENGTH) : value;
+
+  const { rows } = await pool.query(
+    `INSERT INTO "Memories" ("Key", "Value", "Category", "Expires at", "Updated at")
+     VALUES ($1, $2, $3, $4, now())
+     ON CONFLICT ("Key")
+     DO UPDATE SET "Value" = EXCLUDED."Value", "Category" = EXCLUDED."Category",
+                   "Expires at" = EXCLUDED."Expires at", "Updated at" = now()
+     RETURNING "Key" AS "key"`,
+    [normalizedKey, boundedValue, category ?? null, expiresAt ?? null]
+  );
+
+  // Backstop: trim oldest-updated rows beyond the cap, regardless of how
+  // this table got there.
+  await pool.query(
+    `DELETE FROM "Memories" WHERE "Id" IN (
+       SELECT "Id" FROM "Memories" ORDER BY "Updated at" DESC OFFSET $1
+     )`,
+    [MAX_MEMORY_ROWS]
+  );
+
+  return { key: rows[0].key, truncated };
+}
+
+export async function deleteMemory(key) {
+  const { rows } = await pool.query(`DELETE FROM "Memories" WHERE "Key" = $1 RETURNING "Key" AS "key"`, [normalizeMemoryKey(key)]);
+  return rows.length > 0;
+}
+
 export async function getConversationHistory() {
   const { rows } = await pool.query(
     `SELECT "Content" AS "content" FROM "Conversations" WHERE "Id" = 1`

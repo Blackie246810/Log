@@ -11,6 +11,7 @@ import * as editCmd from './commands/edit.js';
 import * as clearCmd from './commands/clear.js';
 import * as currencyCmd from './commands/currency.js';
 import * as timezoneCmd from './commands/timezone.js';
+import * as memoryCmd from './commands/memory.js';
 import * as logModal from './modals/logModal.js';
 import * as noteModal from './modals/noteModal.js';
 import * as deleteModal from './modals/deleteModal.js';
@@ -29,6 +30,7 @@ import { logError, reportError, errorDetail } from './errorReporter.js';
 import { startHealthServer } from './health.js';
 import { handleAiMessage } from './aiMessageHandler.js';
 import { loadConstants } from './constantsStore.js';
+import { startDailyConversationReset } from './conversationReset.js';
 
 dotenv.config();
 
@@ -38,7 +40,7 @@ const client = new Client({
 });
 
 client.commands = new Collection();
-for (const cmd of [logCmd, balanceCmd, historyCmd, undoCmd, categoriesCmd, fileCmd, deleteCmd, editCmd, clearCmd, currencyCmd, timezoneCmd]) {
+for (const cmd of [logCmd, balanceCmd, historyCmd, undoCmd, categoriesCmd, fileCmd, deleteCmd, editCmd, clearCmd, currencyCmd, timezoneCmd, memoryCmd]) {
   client.commands.set(cmd.data.name, cmd);
 }
 
@@ -98,6 +100,7 @@ client.once('clientReady', async () => {
   }
   const port = Number(process.env.PORT) || Number(process.env.HEALTH_PORT) || 3000;
   startHealthServer(client, port);
+  startDailyConversationReset();
 });
 
 client.on('interactionCreate', async (interaction) => {
