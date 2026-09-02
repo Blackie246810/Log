@@ -713,6 +713,7 @@ export async function askAi(userMessage, botName, client, attachmentParts = [], 
       config: {
         systemInstruction: buildStaticSystemInstruction(botName),
         tools: requestTools(),
+        toolConfig: { includeServerSideToolInvocations: true },
         thinkingConfig: { thinkingLevel: currentThinkingLevel },
       },
     };
