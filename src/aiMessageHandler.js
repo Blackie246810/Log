@@ -50,32 +50,43 @@ function createLoaderAnimator(placeholder, words) {
   let step = 0;
   let wordIndex = 0;
   let timer = null;
-  let busy = false;
+  let stopped = true;
+  // Tracks the in-flight edit (if any) so stop() can wait for it instead of
+  // walking away mid-request. clearInterval only stops *future* ticks — it
+  // has no effect on a tick() whose placeholder.edit() is already in flight,
+  // and that stale edit can otherwise resolve and land *after* the real
+  // result/error message is written, silently overwriting it.
+  let inFlight = null;
 
-  async function tick() {
-    if (busy) return;
-    busy = true;
+  function tick() {
+    if (stopped || inFlight) return; // skip a frame rather than queue up
     const label = words[wordIndex % words.length];
     const dots = LOADER_DOTS[step % LOADER_DOTS.length];
     step++;
     if (step % LOADER_DOTS.length === 0) wordIndex++;
-    try {
-      await placeholder.edit(`${label}${dots}`);
-    } catch {
-      // cosmetic only
-    } finally {
-      busy = false;
-    }
+    inFlight = placeholder
+      .edit(`${label}${dots}`)
+      .catch(() => {
+        // cosmetic only
+      })
+      .finally(() => {
+        inFlight = null;
+      });
   }
 
   return {
     start() {
+      stopped = false;
       tick();
       timer = setInterval(tick, LOADER_TICK_MS);
     },
-    stop() {
+    // async now: callers MUST await this before writing the real content to
+    // `placeholder`, or the ordering guarantee is worthless.
+    async stop() {
+      stopped = true;
       if (timer) clearInterval(timer);
       timer = null;
+      if (inFlight) await inFlight;
     },
   };
 }
@@ -185,7 +196,7 @@ export async function handleAiMessage(message) {
 
   try {
     const reply = await askAi(text, message.client.user.username, undefined, attachmentParts, attachmentMeta);
-    thinkingLoader.stop();
+    await thinkingLoader.stop();
 
     answeringLoader = createLoaderAnimator(placeholder, ANSWERING_WORDS);
     answeringLoader.start();
@@ -215,7 +226,7 @@ export async function handleAiMessage(message) {
     if (attachmentChunks[0]) firstPayload.files = attachmentChunks[0];
     if (!firstPayload.content && !firstPayload.files) firstPayload.content = "Here's what I found.";
 
-    answeringLoader.stop();
+    await answeringLoader.stop();
     await placeholder.edit(firstPayload);
 
     for (let i = 1; i < textChunks.length; i++) {
@@ -230,6 +241,12 @@ export async function handleAiMessage(message) {
     }
   } catch (err) {
     logError('ai message handler', err);
+    // Stop both loaders — and wait for any edit they already had in
+    // flight — before writing the error message. Otherwise a stale
+    // "Thinking..."/"Answering..." edit can resolve after this one and
+    // silently overwrite the error text on screen.
+    await thinkingLoader.stop();
+    if (answeringLoader) await answeringLoader.stop();
     // All-keys-exhausted gets its own clean, purpose-written message
     // (see gemini.js) instead of running the raw error through the
     // that generic path would otherwise forward the raw provider error,
@@ -241,7 +258,10 @@ export async function handleAiMessage(message) {
     await placeholder.edit(text);
   } finally {
     clearInterval(typingInterval);
-    thinkingLoader.stop();
-    if (answeringLoader) answeringLoader.stop();
+    // Idempotent safety net — both loaders are already stopped on every
+    // path above; this just guarantees the interval is cleared even if an
+    // unexpected throw happens between the try block and those calls.
+    await thinkingLoader.stop();
+    if (answeringLoader) await answeringLoader.stop();
   }
 }
