@@ -200,6 +200,94 @@ function rotateKey() {
   activeKeyIndex = (activeKeyIndex + 1) % API_KEYS.length;
 }
 
+// True if this key is unusable *right now* for any reason — permanently
+// invalid, or still inside an RPM/TPM/RPD cooldown window. Used to detect
+// the "every key is out of action" situation, both proactively (before
+// wasting a call) and as the reason the retry loop below ran out of keys.
+function isKeyCurrentlyUnusable(key) {
+  if (permanentlyInvalidKeys.has(key)) return true;
+  const now = Date.now();
+  return (
+    (rpmExhaustedUntil.get(key) ?? 0) > now ||
+    (tpmExhaustedUntil.get(key) ?? 0) > now ||
+    (rpdExhaustedUntil.get(key) ?? 0) > now
+  );
+}
+
+// Thrown when no configured key can serve a request right now. Kept as its
+// own class (rather than a plain Error) so callers — see aiMessageHandler.js
+// — can show its message directly instead of running it through the
+// generic error formatter, which would otherwise forward whatever URL the
+// underlying provider error happens to mention straight into a Discord
+// message and let Discord auto-unfurl it into a distracting link-preview
+// card.
+export class AllKeysExhaustedError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'AllKeysExhaustedError';
+  }
+}
+
+const ORDINALS = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth'];
+function ordinal(index) {
+  return ORDINALS[index] ?? `${index + 1}th`;
+}
+
+// Never mentions the underlying provider — just "the Nth key" — so this
+// reads the same regardless of which AI backend is configured.
+function buildInvalidKeyMessage() {
+  const invalidPositions = API_KEYS
+    .map((key, i) => (permanentlyInvalidKeys.has(key) ? ordinal(i) : null))
+    .filter(Boolean);
+
+  if (invalidPositions.length === 0) return null;
+
+  const list = invalidPositions.length === 1
+    ? invalidPositions[0]
+    : `${invalidPositions.slice(0, -1).join(', ')} and ${invalidPositions[invalidPositions.length - 1]}`;
+  const isPlural = invalidPositions.length > 1;
+
+  return `Invalid key found: the ${list} key${isPlural ? 's are' : ' is'} invalid or not working.`;
+}
+
+// A key's own recovery time is the LATEST of its currently-active cooldowns
+// (it needs every one of them to clear, not just the first), so this takes
+// the max across RPM/TPM/RPD for one key, then the earliest such time
+// across all non-invalid keys — i.e. whichever key comes back first.
+function keyRecoveryTime(key) {
+  const now = Date.now();
+  const active = [rpmExhaustedUntil, tpmExhaustedUntil, rpdExhaustedUntil]
+    .map((m) => m.get(key) ?? 0)
+    .filter((ts) => ts > now);
+  return active.length ? Math.max(...active) : now;
+}
+
+function soonestKeyRecovery() {
+  const usableKeys = API_KEYS.filter((k) => !permanentlyInvalidKeys.has(k));
+  if (usableKeys.length === 0) return null;
+  return Math.min(...usableKeys.map(keyRecoveryTime));
+}
+
+// The blocking message shown when literally nothing can serve a request
+// right now. Invalid keys are the actionable case (a human needs to fix
+// them — they won't self-resolve) so that takes priority; otherwise every
+// key is just cooling down and will free up on its own.
+function buildAllKeysUnusableMessage() {
+  const invalidMessage = buildInvalidKeyMessage();
+  if (invalidMessage) return invalidMessage;
+
+  const now = Date.now();
+  const recovery = soonestKeyRecovery();
+  const countdown = formatCountdown((recovery ?? now) - now);
+  const increment = Math.round(100 / API_KEYS.length);
+
+  return (
+    `DANGER: Request/usage rate full.\n` +
+    `100% of your total request/usage quota is exhausted.\n` +
+    `Cools down ${increment}% in [${countdown}]`
+  );
+}
+
 // Recognizes the class of error that means "this specific key is done" —
 // quota/rate-limit exhaustion or the key itself being invalid/unauthorized —
 // as opposed to an unrelated failure (bad request, network hiccup, etc.)
@@ -260,24 +348,25 @@ function markKeyExhausted(key, limitType) {
   else if (limitType === 'RPD') rpdExhaustedUntil.set(key, nextMidnightInZone(new Date(now), RPD_RESET_TIMEZONE));
 }
 
-// Formats a duration as "Xhrs Ymin", rounding up to the next minute so a
-// cooldown that just started (e.g. 60000ms left on a fresh RPM hit) reads
-// as "0hrs 1min" rather than "0hrs 0min".
-function formatRemaining(ms) {
-  const totalMinutes = Math.max(0, Math.ceil(ms / 60000));
-  const hrs = Math.floor(totalMinutes / 60);
-  const mins = totalMinutes % 60;
-  return `${hrs}hrs ${mins}min`;
+// Formats a duration as "0H 0M 58S", rounding up to the next second so a
+// cooldown that just started still reads as a moment away rather than 0.
+function formatCountdown(ms) {
+  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+  const hrs = Math.floor(totalSeconds / 3600);
+  const mins = Math.floor((totalSeconds % 3600) / 60);
+  const secs = totalSeconds % 60;
+  return `${hrs}H ${mins}M ${secs}S`;
 }
 
-// Builds one warning line for a given limit type, based on whichever keys
-// are *currently* on cooldown for it (other keys may already have been
-// cooling down from earlier messages, not just the one(s) that triggered
-// this call). The countdown shown is to the *next* key coming back, i.e.
-// how long until the percentage drops by one key's worth (+33% for 3 keys).
-// `metricLabel` distinguishes what's actually being counted — "Request" for
-// RPM/RPD, "Token" for TPM — since a token-quota hit isn't a "request count".
-function buildQuotaWarningLine(expiryMap, periodLabel, metricLabel = 'Request') {
+// Builds the WARNING line for a given rate-limit type (RPM/RPD), based on
+// whichever keys are *currently* on cooldown for it (other keys may
+// already have been cooling down from earlier messages, not just the
+// one(s) that triggered this call). The countdown shown is to the *next*
+// key coming back, i.e. how long until the percentage drops by one key's
+// worth (+33% for 3 keys). Only used for the "still got an answer by
+// rotating" case — full exhaustion is handled separately by
+// buildAllKeysUnusableMessage, which blocks the whole request.
+function buildRateLimitLine(expiryMap, periodLabel) {
   const now = Date.now();
   const total = API_KEYS.length;
   const activeExpiries = API_KEYS
@@ -287,40 +376,58 @@ function buildQuotaWarningLine(expiryMap, periodLabel, metricLabel = 'Request') 
   if (activeExpiries.length === 0) return null;
 
   const pct = Math.round((activeExpiries.length / total) * 100);
-  const severity = pct >= 100 ? 'Danger' : 'Warning';
   const increment = Math.round(100 / total);
   const soonestExpiry = Math.min(...activeExpiries);
-  const remaining = formatRemaining(soonestExpiry - now);
+  const countdown = formatCountdown(soonestExpiry - now);
 
-  return `${severity}: High ${metricLabel} count for this ${periodLabel}\n${pct}% of ${metricLabel.toLowerCase()} quota reached\n[${remaining}] remaining for +${increment}%`;
+  return (
+    `WARNING: High request/usage rate reached for this ${periodLabel}\n` +
+    `${pct}% of your total request/usage quota is exhausted for this ${periodLabel}\n` +
+    `Cools down ${increment}% in [${countdown}]`
+  );
 }
 
+// Builds one warning line for a given limit type, based on whichever keys
+// are *currently* on cooldown for it (other keys may already have been
+// cooling down from earlier messages, not just the one(s) that triggered
+// this call). The countdown shown is to the *next* key coming back, i.e.
+// how long until the percentage drops by one key's worth (+33% for 3 keys).
+// `metricLabel` distinguishes what's actually being counted — "Request" for
+// RPM/RPD, "Token" for TPM — since a token-quota hit isn't a "request count".
 // Only builds lines for limit types that were actually hit *during this
 // specific call* (tracked via the hitLimitTypes set passed in from askAi) —
 // not just whatever happens to be globally on cooldown from earlier
-// messages — so a clean, unaffected reply stays clean.
+// messages — so a clean, unaffected reply stays clean. TPM gets a fixed,
+// simpler message since "how full is the token bucket" isn't something
+// worth surfacing a percentage/countdown for.
 function buildQuotaWarnings(hitLimitTypes) {
   const lines = [];
   if (hitLimitTypes.has('RPM')) {
-    const line = buildQuotaWarningLine(rpmExhaustedUntil, 'minute', 'Request');
-    if (line) lines.push(line);
-  }
-  if (hitLimitTypes.has('TPM')) {
-    const line = buildQuotaWarningLine(tpmExhaustedUntil, 'minute', 'Token');
+    const line = buildRateLimitLine(rpmExhaustedUntil, 'minute');
     if (line) lines.push(line);
   }
   if (hitLimitTypes.has('RPD')) {
-    const line = buildQuotaWarningLine(rpdExhaustedUntil, 'day', 'Request');
+    const line = buildRateLimitLine(rpdExhaustedUntil, 'day');
     if (line) lines.push(line);
+  }
+  if (hitLimitTypes.has('TPM')) {
+    lines.push('WARNING: Too much data to process at once\nTry clearing your history or try again later');
   }
   return lines;
 }
 
-
-function appendQuotaWarnings(text, hitLimitTypes) {
-  if (!hitLimitTypes || hitLimitTypes.size === 0) return text;
-  const warnings = buildQuotaWarnings(hitLimitTypes);
-  return warnings.length ? `${text}\n\n${warnings.join('\n\n')}` : text;
+// Appended to a reply that still succeeded despite hitting some limit
+// along the way (rotated to another key) — rate-limit warnings for
+// whichever limit types were actually hit this call, plus a standing
+// notice if any configured key is currently known to be invalid. The
+// invalid-key notice isn't gated on "hit this call" the way the rate-limit
+// ones are: an invalid key doesn't recover on its own, so it's worth
+// repeating until someone fixes it.
+function appendStatusNotices(text, hitLimitTypes) {
+  const notices = hitLimitTypes ? buildQuotaWarnings(hitLimitTypes) : [];
+  const invalidNotice = buildInvalidKeyMessage();
+  if (invalidNotice) notices.push(invalidNotice);
+  return notices.length ? `${text}\n\n${notices.join('\n\n')}` : text;
 }
 
 // Google's grounding terms require surfacing attribution whenever a reply
@@ -353,11 +460,12 @@ function buildGroundingSourcesFooter(response) {
 // if provided, fires whenever a key gets marked exhausted for a
 // recognized RPM/RPD quota.
 async function withKeyRotation(fn, onLimitHit) {
-  if (permanentlyInvalidKeys.size >= API_KEYS.length) {
-    throw new Error(
-      `All ${API_KEYS.length} configured Gemini API key(s) are marked invalid (checked at startup or during earlier calls this run). ` +
-      `Check GET /health for the reasons, fix the keys in AI Studio, then restart.`
-    );
+  // Proactive short-circuit: if every key is already known to be invalid
+  // or still cooling down from an earlier RPM/TPM/RPD hit, don't bother
+  // spending a call finding that out again — go straight to the clean
+  // "nothing usable" message.
+  if (API_KEYS.every(isKeyCurrentlyUnusable)) {
+    throw new AllKeysExhaustedError(buildAllKeysUnusableMessage());
   }
 
   let lastErr;
@@ -397,7 +505,14 @@ async function withKeyRotation(fn, onLimitHit) {
     }
   }
 
-  throw lastErr ?? new Error('No usable Gemini API key available.');
+  // Reaching here means every key we actually attempted this round threw
+  // an isKeyExhaustedError — anything else would have been re-thrown
+  // immediately above. That's the same "nothing usable" situation as the
+  // proactive check at the top of this function, so it gets the same
+  // clean message, never the raw `lastErr` provider error (which is often
+  // an ApiError whose message embeds a doc URL — exactly the thing that
+  // was leaking into Discord as an ugly auto-unfurled link preview).
+  throw new AllKeysExhaustedError(buildAllKeysUnusableMessage());
 }
 
 // Pings every configured key with the cheapest possible call — listing
@@ -596,7 +711,7 @@ export async function askAi(userMessage, botName, client, attachmentParts = [], 
       const leanHistory = [...history, { role: 'user', parts: sanitizedUserParts }, { role: 'model', parts: [{ text }] }];
       await saveHistory(leanHistory);
       const withSources = sourcesFooter ? `${text}\n\n${sourcesFooter}` : text;
-      return appendQuotaWarnings(withSources, hitLimitTypes);
+      return appendStatusNotices(withSources, hitLimitTypes);
     }
 
     const candidateContent = response.candidates?.[0]?.content;
@@ -615,7 +730,7 @@ export async function askAi(userMessage, botName, client, attachmentParts = [], 
     contents.push({ role: 'user', parts: responseParts });
   }
 
-  return appendQuotaWarnings('That took too many steps to answer — try asking something more specific.', hitLimitTypes);
+  return appendStatusNotices('That took too many steps to answer — try asking something more specific.', hitLimitTypes);
 }
 
 async function saveHistory(contents) {

@@ -45,6 +45,16 @@ for (const cmd of [logCmd, balanceCmd, historyCmd, undoCmd, categoriesCmd, fileC
   client.commands.set(cmd.data.name, cmd);
 }
 
+// Start the health server right away, independent of Discord login. Render's
+// health checks (and any external cron pinger) hit this port on a fixed
+// schedule from the moment the process boots — they don't wait for
+// clientReady. If startup was gated on Discord being connected, a slow or
+// failed Discord login (or a hang in loadConstants/validateGeminiKeys) would
+// leave nothing listening on the port, and Render would treat the service as
+// down and restart it even though the process itself was fine.
+const port = Number(process.env.PORT) || Number(process.env.HEALTH_PORT) || 3000;
+startHealthServer(client, port);
+
 // Every slash command, modal, and button is gated to the bot owner alone —
 // same env var the AI chat and error-DM already use. Anyone else is told
 // plainly rather than the interaction silently doing nothing.
@@ -122,8 +132,6 @@ client.once('clientReady', async () => {
     logError('startup: validateGeminiKeys failed', err);
   }
 
-  const port = Number(process.env.PORT) || Number(process.env.HEALTH_PORT) || 3000;
-  startHealthServer(client, port);
   startDailyConversationReset();
 });
 

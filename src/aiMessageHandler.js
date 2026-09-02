@@ -1,6 +1,6 @@
 import { AttachmentBuilder } from 'discord.js';
-import { askAi } from './ai/gemini.js';
-import { logError, errorDetail } from './errorReporter.js';
+import { askAi, AllKeysExhaustedError } from './ai/gemini.js';
+import { logError, describeError } from './errorReporter.js';
 import { renderTableImages, MAX_TABLES_PER_MESSAGE } from './tableImage.js';
 import { buildAttachmentParts } from './ai/attachments.js';
 import { extractFileAttachments } from './ai/outgoingFiles.js';
@@ -149,7 +149,15 @@ export async function handleAiMessage(message) {
     }
   } catch (err) {
     logError('ai message handler', err);
-    await placeholder.edit(`Something went wrong asking the AI — ${errorDetail(err)}`);
+    // All-keys-exhausted gets its own clean, purpose-written message
+    // (see gemini.js) instead of running the raw error through the
+    // that generic path would otherwise forward the raw provider error,
+    // which often contains a doc URL that Discord auto-unfurls into a
+    // distracting link-preview card.
+    const text = err instanceof AllKeysExhaustedError
+      ? err.message
+      : `Something went wrong: ${describeError(err).message}`;
+    await placeholder.edit(text);
   } finally {
     clearInterval(typingInterval);
   }

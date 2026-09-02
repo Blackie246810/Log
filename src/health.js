@@ -13,22 +13,31 @@ export function startHealthServer(client, port) {
       return;
     }
 
+    // client.isReady() reflects whether the Discord gateway connection is up.
+    // The health server itself starts before login finishes, so this can
+    // legitimately be false for a few seconds right after boot without the
+    // process being unhealthy.
+    const discord = client.isReady() ? 'up' : 'connecting';
     const geminiKeys = getKeyPoolStatus();
 
     if (!DB_PING_ENABLED) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', database: 'skipped', geminiKeys, timestamp: new Date().toISOString() }));
+      res.end(JSON.stringify({ status: 'ok', discord, database: 'skipped', geminiKeys, timestamp: new Date().toISOString() }));
       return;
     }
 
     try {
       await pingDatabase();
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', database: 'up', geminiKeys, timestamp: new Date().toISOString() }));
+      res.end(JSON.stringify({ status: 'ok', discord, database: 'up', geminiKeys, timestamp: new Date().toISOString() }));
     } catch (err) {
-      await reportError(client, 'health-check', err);
+      if (client.isReady()) {
+        await reportError(client, 'health-check', err);
+      } else {
+        console.error('[health-check] db ping failed and Discord is not ready yet:', err);
+      }
       res.writeHead(503, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'error', database: 'down', geminiKeys }));
+      res.end(JSON.stringify({ status: 'error', discord, database: 'down', geminiKeys }));
     }
   });
 
