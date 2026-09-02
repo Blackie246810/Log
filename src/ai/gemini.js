@@ -6,7 +6,7 @@ import { MAX_TABLES_PER_MESSAGE } from '../tableImage.js';
 import { getCurrency, getTimezone } from '../constantsStore.js';
 import { logError, describeError } from '../errorReporter.js';
 
-const MODEL = 'gemini-3.7-flash';
+const MODEL = 'gemini-3.5-flash';
 // The @google/genai SDK's own httpOptions.timeout is unreliable (a known
 // SDK bug — it's silently ignored for generateContent), so a hung request
 // otherwise falls all the way back to undici's default headers timeout
@@ -14,7 +14,7 @@ const MODEL = 'gemini-3.7-flash';
 // simple as "hello". This wraps the call in our own timeout so a stuck
 // request fails fast and (via withKeyRotation) can retry a fresh key
 // instead of leaving the user staring at "Thinking..." for ages.
-const REQUEST_TIMEOUT_MS = 25000;
+const REQUEST_TIMEOUT_MS = 60000;
 
 class RequestTimeoutError extends Error {
   constructor(ms) {

@@ -1,16 +1,5 @@
-import { setDefaultAutoSelectFamilyAttemptTimeout } from 'node:net';
 import { Client, GatewayIntentBits, Partials, Collection } from 'discord.js';
 import dotenv from 'dotenv';
-
-// Node's native fetch (undici — what @google/genai uses internally) races
-// IPv6 and IPv4 connection attempts ("happy eyeballs") and only falls back
-// to IPv4 after a long wait if the IPv6 path stalls. On Render's network,
-// the IPv6 path to Google's API can silently hang instead of failing fast,
-// so every affected request pays that full stall before it even starts
-// the real attempt — this, not Gemini itself, is what was actually eating
-// minutes on a plain "hello". Cutting the IPv6-attempt window down means a
-// stalled IPv6 path gives up and falls back to IPv4 almost immediately.
-setDefaultAutoSelectFamilyAttemptTimeout(300);
 
 import * as logCmd from './commands/log.js';
 import * as balanceCmd from './commands/balance.js';
