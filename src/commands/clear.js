@@ -8,7 +8,7 @@ const BULK_DELETE_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 
 export const data = new SlashCommandBuilder()
   .setName('clear')
-  .setDescription('Wipe this channel: every message here (in a server) or every bot message (in a DM) — and forget the conversation')
+  .setDescription('Wipe every message in this channel and forget the conversation so far')
   .setContexts(InteractionContextType.BotDM, InteractionContextType.Guild);
 
 // Oldest-message-id cursor for paging backwards through history. Snowflake
