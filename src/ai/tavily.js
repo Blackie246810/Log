@@ -116,8 +116,12 @@ async function callTavily(key, body) {
 
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    const err = new Error(`Tavily request failed (${res.status}): ${text || res.statusText}`);
+    // Kept out of the thrown message on purpose (status/text can include
+    // the provider's own name) — this is only for console logs via
+    // logError, never read directly by the model or shown to the user.
+    const err = new Error(`Search request failed (HTTP ${res.status}).`);
     err.status = res.status;
+    err.providerDetail = text || res.statusText;
     throw err;
   }
 
@@ -131,7 +135,7 @@ async function callTavily(key, body) {
 async function searchWithRotation(body) {
   if (!isConfigured()) {
     throw new TavilySearchUnavailableError(
-      'Web search is not set up right now — no Tavily API key is configured. Tell the user search isn\'t available at the moment.'
+      'Web search is not set up right now. Tell the user search isn\'t available at the moment — do not mention any provider or service name, just that the capability is temporarily unavailable.'
     );
   }
 
@@ -155,8 +159,12 @@ async function searchWithRotation(body) {
   }
 
   // Every configured key was tried and every one came back exhausted.
+  // Deliberately does NOT include the raw provider error text here (it
+  // can contain the provider's own name/URLs) — this message is read
+  // directly by the model and possibly echoed toward the user, so it
+  // must already be safe to say verbatim.
   throw new TavilySearchUnavailableError(
-    `Web search is temporarily unavailable — every configured Tavily API key is currently rate-limited, out of credits, or invalid (last error: ${lastErr?.message ?? 'unknown'}). Tell the user you can't search the web right now and to try again later.`
+    'Web search is temporarily unavailable right now (rate-limited or out of capacity). Tell the user you can\'t search the web right now and to try again later — do not mention any provider or service name, just that the capability is temporarily unavailable.'
   );
 }
 

@@ -37,7 +37,7 @@ import { startDailyConversationReset } from './conversationReset.js';
 dotenv.config();
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.DirectMessages, GatewayIntentBits.MessageContent],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.DirectMessages, GatewayIntentBits.MessageContent],
   partials: [Partials.Channel],
 });
 
@@ -123,7 +123,7 @@ client.once('clientReady', async () => {
       if (ownerId) {
         try {
           const owner = await client.users.fetch(ownerId);
-          await owner.send(`⚠️ **Gemini key check on startup**\n${report}`);
+          await owner.send(`⚠️ **AI service key check on startup**\n${report}`);
         } catch (dmErr) {
           logError('startup: failed to DM key check report', dmErr);
         }
@@ -202,19 +202,17 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// Anyone can DM this bot even though only the owner can actually use it —
-// non-owner attempts are rate-limited via shouldReplyToUnauthorized above.
+// Anyone else who talks in a channel this bot can see (e.g. other members
+// of a shared server channel who are only there to spectate) is silently
+// ignored on plain messages — no reply, no acknowledgment, nothing. This
+// is deliberate: this bot is a single-owner personal assistant, and a
+// spectator shouldn't be able to tell it noticed them at all. Slash
+// commands from non-owners are still rejected (see rejectUnauthorized
+// above) but that's a private, ephemeral reply only that person sees, not
+// a message in the shared channel — so it doesn't create the same noise.
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
-  if (message.author.id !== process.env.DISCORD_OWNER_ID) {
-    if (!shouldReplyToUnauthorized(message.author.id)) return;
-    try {
-      await message.reply('You are not authorized for this action.');
-    } catch (err) {
-      logError('unauthorized message reply failed', err);
-    }
-    return;
-  }
+  if (message.author.id !== process.env.DISCORD_OWNER_ID) return;
   try {
     await handleAiMessage(message);
   } catch (err) {

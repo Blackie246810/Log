@@ -1,6 +1,6 @@
 import { AttachmentBuilder } from 'discord.js';
 import { askAi, AllKeysExhaustedError } from './ai/gemini.js';
-import { logError, describeError } from './errorReporter.js';
+import { logError, describeError, redactVendorNames } from './errorReporter.js';
 import { renderTableImages, MAX_TABLES_PER_MESSAGE } from './tableImage.js';
 import { buildAttachmentParts } from './ai/attachments.js';
 import { extractFileAttachments } from './ai/outgoingFiles.js';
@@ -254,7 +254,7 @@ export async function handleAiMessage(message) {
     // distracting link-preview card.
     const text = err instanceof AllKeysExhaustedError
       ? err.message
-      : `Something went wrong: ${describeError(err).message}`;
+      : `Something went wrong: ${redactVendorNames(describeError(err).message)}`;
     await placeholder.edit(text);
   } finally {
     clearInterval(typingInterval);

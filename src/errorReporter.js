@@ -8,6 +8,20 @@ export function logError(context, err) {
   console.error(`[${context}]`, err);
 }
 
+// Defense-in-depth: the bot's own code is written to keep provider/vendor
+// names (which underlying AI model, which search backend, etc.) out of
+// anything that reaches Discord — but a raw error thrown from a
+// third-party SDK is free-form text we don't fully control, so as a last
+// line of defense, scrub any of those names out of text before it's ever
+// sent to a channel or DM. This never touches what's printed to the
+// console via logError, only text on the Discord-facing path.
+const VENDOR_NAME_PATTERN = /\b(gemini|google\s*gen(?:erative)?\s*ai|googlegenai|tavily|palm|bard|vertex\s*ai)\b/gi;
+
+export function redactVendorNames(text) {
+  if (!text) return text;
+  return text.replace(VENDOR_NAME_PATTERN, 'the AI service');
+}
+
 // Pulls a clean {name, message} pair out of any thrown value.
 export function describeError(err) {
   if (!(err instanceof Error)) {
@@ -42,10 +56,13 @@ export function describeError(err) {
 }
 
 // Short "**Name:** message" string safe to drop straight into a Discord
-// reply — no stack trace, no file/line info, just what broke and why.
+// reply — no stack trace, no file/line info, no vendor/provider names,
+// just what broke and why.
 export function errorDetail(err) {
   const { name, message } = describeError(err);
-  return `**${name}:** ${message}`.slice(0, 1900);
+  const safeName = redactVendorNames(name);
+  const safeMessage = redactVendorNames(message);
+  return `**${safeName}:** ${safeMessage}`.slice(0, 1900);
 }
 
 export async function reportError(client, context, err) {
