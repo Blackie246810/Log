@@ -9,6 +9,77 @@ const DISCORD_MESSAGE_LIMIT = 2000;
 const TYPING_REFRESH_MS = 8000;
 const TABLE_BLOCK_RE = /```table\s*\n([\s\S]*?)\n```/gi;
 
+// How fast the placeholder's dots/word cycle — kept snappy on purpose so the
+// wait doesn't feel dead. Discord's per-message edit rate limit can't
+// actually keep up with 500ms if it ever gets hit, so the animator below
+// skips a frame rather than queueing up when an edit is still in flight.
+const LOADER_TICK_MS = 500;
+const LOADER_DOTS = ['', '.', '..', '...'];
+
+// Rotated through while we're waiting on the AI itself.
+const THINKING_WORDS = [
+  'Thinking',
+  'Pondering',
+  'Mulling it over',
+  'Ruminating',
+  'Contemplating',
+  'Fathoming',
+  'Percolating',
+  'Noodling',
+  'Chewing on it',
+  'Deliberating',
+];
+
+// Rotated through once we have a reply and are rendering tables/files and
+// assembling the actual Discord message(s) to send.
+const ANSWERING_WORDS = [
+  'Answering',
+  'Composing',
+  'Drafting',
+  'Writing it up',
+  'Putting it together',
+  'Wrapping up',
+];
+
+// Cycles a placeholder message through "<Word><dots>" frames, e.g.
+// "Thinking" -> "Thinking." -> "Thinking.." -> "Thinking..." -> "Fathoming"
+// -> ... A full dot cycle completes before the word changes. Skips a tick
+// if the previous edit hasn't resolved yet, so a rate-limited edit can't
+// pile up a backlog of queued requests.
+function createLoaderAnimator(placeholder, words) {
+  let step = 0;
+  let wordIndex = 0;
+  let timer = null;
+  let busy = false;
+
+  async function tick() {
+    if (busy) return;
+    busy = true;
+    const label = words[wordIndex % words.length];
+    const dots = LOADER_DOTS[step % LOADER_DOTS.length];
+    step++;
+    if (step % LOADER_DOTS.length === 0) wordIndex++;
+    try {
+      await placeholder.edit(`${label}${dots}`);
+    } catch {
+      // cosmetic only
+    } finally {
+      busy = false;
+    }
+  }
+
+  return {
+    start() {
+      tick();
+      timer = setInterval(tick, LOADER_TICK_MS);
+    },
+    stop() {
+      if (timer) clearInterval(timer);
+      timer = null;
+    },
+  };
+}
+
 function extractTableImages(text) {
   TABLE_BLOCK_RE.lastIndex = 0;
   const attachments = [];
@@ -96,7 +167,7 @@ export async function handleAiMessage(message) {
 
   let placeholder;
   try {
-    placeholder = await message.reply('Thinking...');
+    placeholder = await message.reply('Thinking');
   } catch (err) {
     logError('ai message handler: placeholder send failed', err);
     return;
@@ -108,8 +179,17 @@ export async function handleAiMessage(message) {
     });
   }, TYPING_REFRESH_MS);
 
+  const thinkingLoader = createLoaderAnimator(placeholder, THINKING_WORDS);
+  thinkingLoader.start();
+  let answeringLoader = null;
+
   try {
     const reply = await askAi(text, message.client.user.username, undefined, attachmentParts, attachmentMeta);
+    thinkingLoader.stop();
+
+    answeringLoader = createLoaderAnimator(placeholder, ANSWERING_WORDS);
+    answeringLoader.start();
+
     const { attachments: tableAttachments, warnings: tableWarnings, remainingText: afterTables } = extractTableImages(reply);
     const { attachments: fileAttachments, warnings: fileWarnings, remainingText } = extractFileAttachments(afterTables);
     const attachments = [...tableAttachments, ...fileAttachments];
@@ -135,6 +215,7 @@ export async function handleAiMessage(message) {
     if (attachmentChunks[0]) firstPayload.files = attachmentChunks[0];
     if (!firstPayload.content && !firstPayload.files) firstPayload.content = "Here's what I found.";
 
+    answeringLoader.stop();
     await placeholder.edit(firstPayload);
 
     for (let i = 1; i < textChunks.length; i++) {
@@ -160,5 +241,7 @@ export async function handleAiMessage(message) {
     await placeholder.edit(text);
   } finally {
     clearInterval(typingInterval);
+    thinkingLoader.stop();
+    if (answeringLoader) answeringLoader.stop();
   }
 }

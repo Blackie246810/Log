@@ -1,5 +1,6 @@
 import { runReadOnlyQuery, upsertMemory, deleteMemory } from '../db.js';
 import { buildSelectQuery, ALLOWED_TABLES, allowedColumnsFor } from './queryBuilder.js';
+import { searchWeb } from './tavily.js';
 
 export const toolDeclarations = [
   {
@@ -117,6 +118,40 @@ export const toolDeclarations = [
       required: ['key'],
     },
   },
+  {
+    name: 'set_thinking_level',
+    description:
+      `Switch how much internal reasoning budget you use for the rest of this turn. Every conversation starts at 'medium'. Call this tool once, as the very first thing you do this turn (before any other tool call), to move to whichever level actually fits the message: ` +
+      `'low' — genuinely casual, no-reasoning-needed messages (a bare greeting, "thanks", "ok", small talk, an emoji reply). ` +
+      `'medium' — the default; anything that isn't casual but also isn't financial (bot/slash-command questions, general knowledge, anything not touching Ameen's actual money) — for this category, don't call the tool at all, just stay at the default. ` +
+      `'high' — anything that touches or relates to financial data, no matter how small (a single balance check counts just as much as a multi-row analysis). Call this BEFORE calling query_data, since the level only applies starting from your next step onward — it cannot retroactively change the reasoning already used to decide to call this tool. As a backstop, the system will also force the level to 'high' automatically the moment query_data is called even if this tool was never invoked or was set lower — but call it yourself anyway, since that backstop only protects hops AFTER the query_data call, not the hop where you're deciding what to query in the first place. ` +
+      `Call this once near the start of the turn based on which category the message falls into — not defensively on every message, and not more than once unless the situation genuinely changes mid-turn.`,
+    parametersJsonSchema: {
+      type: 'object',
+      properties: {
+        level: { type: 'string', enum: ['low', 'medium', 'high'], description: 'The thinking level to use starting from your next step this turn.' },
+        reason: { type: 'string', description: 'Optional short reason for the switch (for logging/debugging only, not shown to the user).' },
+      },
+      required: ['level'],
+    },
+  },
+  {
+    name: 'search_web',
+    description:
+      `Search the live web for real-time facts, current events, or anything else you can't already know or can't get from query_data — current prices, exchange rates, news, "what is X", "when did Y happen recently", general facts, etc. Powered by the Tavily search API (not Google directly). Returns a short synthesized answer (when Tavily is confident enough to produce one) plus a handful of individual result snippets with title/url/content for you to read and cite from — always prefer stating information you can attribute to a specific result over leaning on the synthesized answer alone. ` +
+      `This is unrelated to the finance database — never use it as a substitute for query_data, and never use query_data results to answer something that actually requires a web search. ` +
+      `This tool can occasionally be unavailable — e.g. if every configured Tavily API key is currently rate-limited, out of credits, or invalid. If that happens, the tool's response will contain an "error" field explaining why instead of results — when you see that, tell the user plainly (in your own words) that web search isn't available right now and to try again later, rather than pretending you searched or making up an answer.`,
+    parametersJsonSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'The search query, written naturally (e.g. "current USD to INR exchange rate", "latest iPhone model").' },
+        max_results: { type: 'number', description: 'How many result snippets to return, 1-10. Defaults to 5 — raise it if the question is broad enough that more sources would help.' },
+        topic: { type: 'string', enum: ['general', 'news'], description: 'Use "news" for recent-events/current-affairs questions, "general" (default) for everything else.' },
+        time_range: { type: 'string', enum: ['day', 'week', 'month', 'year'], description: 'Optional recency filter — restricts results to content from within this window. Leave unset unless the question specifically calls for very recent info.' },
+      },
+      required: ['query'],
+    },
+  },
 ];
 
 export async function callTool(name, args = {}) {
@@ -138,6 +173,22 @@ export async function callTool(name, args = {}) {
       if (!key) throw new Error('forget_fact requires a key.');
       const deleted = await deleteMemory(key);
       return { deleted };
+    }
+
+    case 'search_web': {
+      const { query } = args;
+      if (!query) throw new Error('search_web requires a query.');
+      try {
+        return await searchWeb(args);
+      } catch (err) {
+        // TavilySearchUnavailableError (all keys exhausted/invalid/not
+        // configured) and any other search failure both land here as a
+        // plain { error } result — same shape the model already knows how
+        // to read from every other tool's failure path (see askAi's catch
+        // around callTool) — rather than throwing back up and killing the
+        // whole reply.
+        return { error: err.message };
+      }
     }
 
     default:
