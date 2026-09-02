@@ -7,6 +7,32 @@ import { getCurrency, getTimezone } from '../constantsStore.js';
 import { logError, describeError } from '../errorReporter.js';
 
 const MODEL = 'gemini-3.7-flash';
+// The @google/genai SDK's own httpOptions.timeout is unreliable (a known
+// SDK bug — it's silently ignored for generateContent), so a hung request
+// otherwise falls all the way back to undici's default headers timeout
+// (5 minutes) before it errors. That's a 5-minute stall on something as
+// simple as "hello". This wraps the call in our own timeout so a stuck
+// request fails fast and (via withKeyRotation) can retry a fresh key
+// instead of leaving the user staring at "Thinking..." for ages.
+const REQUEST_TIMEOUT_MS = 25000;
+
+class RequestTimeoutError extends Error {
+  constructor(ms) {
+    super(`Gemini request timed out after ${ms}ms`);
+    this.name = 'RequestTimeoutError';
+  }
+}
+
+function withTimeout(promise, ms) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new RequestTimeoutError(ms)), ms);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (err) => { clearTimeout(timer); reject(err); },
+    );
+  });
+}
+
 // Conversation history is no longer trimmed to a fixed turn count — it's
 // wiped once per day instead (see conversationReset.js), so within a day
 // the AI sees the complete conversation every time. This is purely a
@@ -481,9 +507,18 @@ async function withKeyRotation(fn, onLimitHit) {
     }
 
     try {
-      return await fn(clientForKey(key), key);
+      return await withTimeout(fn(clientForKey(key), key), REQUEST_TIMEOUT_MS);
     } catch (err) {
       lastErr = err;
+
+      if (err instanceof RequestTimeoutError) {
+        // Not the key's fault — don't mark it exhausted, just try the next
+        // one (or fail fast below if this was the only key / last attempt).
+        logError(`gemini: request timed out on ${describeKey(key)}, rotating`, err);
+        if (API_KEYS.length > 1) rotateKey();
+        continue;
+      }
+
       if (!isKeyExhaustedError(err)) throw err;
 
       const limitType = detectLimitType(err);
@@ -521,12 +556,15 @@ async function withKeyRotation(fn, onLimitHit) {
   }
 
   // Reaching here means every key we actually attempted this round threw
-  // an isKeyExhaustedError — anything else would have been re-thrown
-  // immediately above. That's the same "nothing usable" situation as the
-  // proactive check at the top of this function, so it gets the same
-  // clean message, never the raw `lastErr` provider error (which is often
-  // an ApiError whose message embeds a doc URL — exactly the thing that
-  // was leaking into Discord as an ugly auto-unfurled link preview).
+  // either an isKeyExhaustedError or a RequestTimeoutError. If it was
+  // genuinely a quota/auth exhaustion, give the same clean message as the
+  // proactive check above (never the raw provider error — that's often an
+  // ApiError whose message embeds a doc URL, which Discord auto-unfurls
+  // into an ugly link-preview card). If every attempt actually just timed
+  // out, say that plainly instead — it's a different problem (network/API
+  // slowness) with a different fix, and "all keys exhausted" would be a
+  // flat-out wrong diagnosis for the user to see.
+  if (lastErr instanceof RequestTimeoutError) throw lastErr;
   throw new AllKeysExhaustedError(buildAllKeysUnusableMessage());
 }
 
@@ -721,7 +759,7 @@ export async function askAi(userMessage, botName, client, attachmentParts = [], 
     let response;
     try {
       response = client
-        ? await client.models.generateContent(requestParams)
+        ? await withTimeout(client.models.generateContent(requestParams), REQUEST_TIMEOUT_MS)
         : await withKeyRotation(
             (activeClient) => activeClient.models.generateContent(requestParams),
             (limitType) => hitLimitTypes.add(limitType),
