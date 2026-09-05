@@ -13,6 +13,7 @@ import * as clearCmd from './commands/clear.js';
 import * as currencyCmd from './commands/currency.js';
 import * as timezoneCmd from './commands/timezone.js';
 import * as memoryCmd from './commands/memory.js';
+import * as levelCmd from './commands/level.js';
 import * as logModal from './modals/logModal.js';
 import * as noteModal from './modals/noteModal.js';
 import * as deleteModal from './modals/deleteModal.js';
@@ -23,16 +24,19 @@ import * as editFieldsModal from './modals/editFieldsModal.js';
 import * as editNoteModal from './modals/editNoteModal.js';
 import * as currencyModal from './modals/currencyModal.js';
 import * as timezoneModal from './modals/timezoneModal.js';
+import * as levelModal from './modals/levelModal.js';
 import * as logNoteButton from './buttons/logNoteButton.js';
 import * as deleteConfirmButton from './buttons/deleteConfirmButton.js';
 import * as editConfirmButton from './buttons/editConfirmButton.js';
 import * as editStartButton from './buttons/editStartButton.js';
 import { logError, reportError, errorDetail } from './errorReporter.js';
 import { startHealthServer } from './health.js';
-import { handleAiMessage } from './aiMessageHandler.js';
+import { handleAiMessage, handleAiMessageBatch } from './aiMessageHandler.js';
 import { validateGeminiKeys } from './ai/gemini.js';
 import { loadConstants } from './constantsStore.js';
 import { startDailyConversationReset } from './conversationReset.js';
+import { ensureMessageCursorTable, ensureChannelConversationsTable, setMessageCursor } from './db.js';
+import { catchUpMissedMessages } from './missedMessages.js';
 
 dotenv.config();
 
@@ -42,7 +46,7 @@ const client = new Client({
 });
 
 client.commands = new Collection();
-for (const cmd of [logCmd, balanceCmd, historyCmd, undoCmd, categoriesCmd, fileCmd, deleteCmd, editCmd, clearCmd, currencyCmd, timezoneCmd, memoryCmd]) {
+for (const cmd of [logCmd, balanceCmd, historyCmd, undoCmd, categoriesCmd, fileCmd, deleteCmd, editCmd, clearCmd, currencyCmd, timezoneCmd, memoryCmd, levelCmd]) {
   client.commands.set(cmd.data.name, cmd);
 }
 
@@ -103,12 +107,99 @@ async function rejectUnauthorized(interaction) {
   }
 }
 
+// Shared by the real-time messageCreate listener below and by the
+// startup catch-up pass (missedMessages.js) — a "missed" message replays
+// through this exact same path, so it gets the same reply/action a live
+// message would, no special-cased behavior for having arrived late.
+// Persisting the cursor BEFORE handling means a message is never replayed
+// twice just because handling it failed or the process died mid-reply —
+// that's consistent with the existing "ping me again" resume behavior in
+// aiMessageHandler.js for real-time failures.
+async function processOwnerMessage(message) {
+  try {
+    await setMessageCursor(message.channelId, message.id);
+  } catch (err) {
+    logError('processOwnerMessage: cursor persist failed', err);
+  }
+  try {
+    await handleAiMessage(message);
+  } catch (err) {
+    logError('messageCreate', err);
+    try {
+      await message.reply(`Something went wrong — ${errorDetail(err)}`);
+    } catch (replyErr) {
+      await reportError(client, 'messageCreate error-reply failed', replyErr);
+    }
+  }
+}
+
+// Catch-up-only counterpart to processOwnerMessage above, used by
+// catchUpMissedMessages (missedMessages.js) instead of it. The cursor for
+// every message in `messages` has already been persisted by the time this
+// is called (missedMessages.js does that as it walks each channel's
+// backlog page by page), so this only needs to worry about getting the AI
+// to actually respond.
+//
+// A SMALL backlog (BATCH_THRESHOLD or fewer) is replied to one message at
+// a time, same as if the bot had been online the whole time — each reply
+// lands as its own message, in order, each one seeing the previous one's
+// answer in history. Only once the backlog is bigger than that does it
+// switch to one combined batched turn (see handleAiMessageBatch) instead
+// of individually replying to every single one — past a few messages,
+// individual replies would mean that many sequential Gemini calls (they
+// have to run one after another so each sees the last one's answer) and
+// that many separate replies flooding back into the channel at once.
+const BATCH_THRESHOLD = 5;
+
+async function processOwnerMessageBatch(messages) {
+  if (messages.length === 0) return;
+
+  if (messages.length <= BATCH_THRESHOLD) {
+    // Sequential on purpose, not parallel — each message's reply needs to
+    // land, and its turn saved to that channel's history, before the next
+    // one is handled, same ordering guarantee a live conversation has.
+    for (const message of messages) {
+      try {
+        await handleAiMessage(message);
+      } catch (err) {
+        logError('missedMessages: individual catch-up message failed', err);
+        try {
+          await message.reply(`Something went wrong — ${errorDetail(err)}`);
+        } catch (replyErr) {
+          await reportError(client, 'missedMessages individual error-reply failed', replyErr);
+        }
+      }
+    }
+    return;
+  }
+
+  try {
+    await handleAiMessageBatch(messages);
+  } catch (err) {
+    const last = messages[messages.length - 1];
+    logError(`missedMessages: batch of ${messages.length} failed`, err);
+    try {
+      await last.reply(`Something went wrong catching up on ${messages.length} missed message(s) — ${errorDetail(err)}`);
+    } catch (replyErr) {
+      await reportError(client, 'missedMessages batch error-reply failed', replyErr);
+    }
+  }
+}
+
 client.once('clientReady', async () => {
   console.log(`Logged in as ${client.user.tag}`);
   try {
     await loadConstants();
   } catch (err) {
     logError('startup: loadConstants failed', err);
+  }
+
+  try {
+    await ensureMessageCursorTable();
+    await ensureChannelConversationsTable();
+    await catchUpMissedMessages(client, processOwnerMessageBatch);
+  } catch (err) {
+    logError('startup: catchUpMissedMessages failed', err);
   }
 
   // Ping every configured Gemini key now, once, rather than finding out a
@@ -171,6 +262,8 @@ client.on('interactionCreate', async (interaction) => {
         await currencyModal.handle(interaction);
       } else if (interaction.customId === timezoneModal.customId) {
         await timezoneModal.handle(interaction);
+      } else if (interaction.customId === levelModal.customId) {
+        await levelModal.handle(interaction);
       }
       return;
     }
@@ -213,16 +306,7 @@ client.on('interactionCreate', async (interaction) => {
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
   if (message.author.id !== process.env.DISCORD_OWNER_ID) return;
-  try {
-    await handleAiMessage(message);
-  } catch (err) {
-    logError('messageCreate', err);
-    try {
-      await message.reply(`Something went wrong — ${errorDetail(err)}`);
-    } catch (replyErr) {
-      await reportError(client, 'messageCreate error-reply failed', replyErr);
-    }
-  }
+  await processOwnerMessage(message);
 });
 
 client.login(process.env.DISCORD_TOKEN).catch(async (err) => {

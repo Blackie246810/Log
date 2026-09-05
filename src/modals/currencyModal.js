@@ -1,7 +1,8 @@
-import { setCurrency } from '../constantsStore.js';
+import { setCurrency, getCurrency } from '../constantsStore.js';
 import { CURRENCY_CODES } from '../currencyList.js';
 import { closestMatches } from '../fuzzyMatch.js';
 import { replyInChunks } from '../chunkedReply.js';
+import { buildSettingChangedEmbed } from '../embeds.js';
 import { logError, errorDetail } from '../errorReporter.js';
 
 export const customId = 'currency-modal';
@@ -12,6 +13,7 @@ export async function handle(interaction) {
 
   const exact = CURRENCY_CODES.find((c) => c === upper);
   if (exact) {
+    const before = getCurrency(); // captured before the write, for the before→after card
     try {
       await setCurrency(exact);
     } catch (err) {
@@ -19,7 +21,7 @@ export async function handle(interaction) {
       await interaction.reply({ content: `Database error — currency was not updated. ${errorDetail(err)}` });
       return;
     }
-    await interaction.reply({ content: `Currency set to ${exact}.` });
+    await interaction.reply({ embeds: [buildSettingChangedEmbed('Currency', before, exact)] });
     return;
   }
 

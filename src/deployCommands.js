@@ -12,10 +12,11 @@ import * as clearCmd from './commands/clear.js';
 import * as currencyCmd from './commands/currency.js';
 import * as timezoneCmd from './commands/timezone.js';
 import * as memoryCmd from './commands/memory.js';
+import * as levelCmd from './commands/level.js';
 
 dotenv.config();
 
-const commands = [logCmd, balanceCmd, historyCmd, undoCmd, categoriesCmd, fileCmd, deleteCmd, editCmd, clearCmd, currencyCmd, timezoneCmd, memoryCmd].map((c) => c.data.toJSON());
+const commands = [logCmd, balanceCmd, historyCmd, undoCmd, categoriesCmd, fileCmd, deleteCmd, editCmd, clearCmd, currencyCmd, timezoneCmd, memoryCmd, levelCmd].map((c) => c.data.toJSON());
 const rest = new REST().setToken(process.env.DISCORD_TOKEN);
 
 try {

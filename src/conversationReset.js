@@ -1,4 +1,4 @@
-import { clearConversationHistory } from './db.js';
+import { clearAllChannelConversationHistories } from './db.js';
 import { getTimezone } from './constantsStore.js';
 import { logError } from './errorReporter.js';
 
@@ -6,7 +6,11 @@ import { logError } from './errorReporter.js';
 // wiped once per calendar day (in the currently live timezone), so within
 // a day the AI always sees the FULL, untrimmed conversation, and each new
 // day starts a clean slate. Long-term memory (the Memories table) is what
-// carries facts across that daily wipe; raw back-and-forth does not.
+// carries facts across that daily wipe; raw back-and-forth does not. Every
+// channel's conversation (see db.js's ChannelConversations table — one row
+// per channel/DM the bot has replied in) is wiped together on the same
+// daily trigger, so a group server channel, a DM, or any other channel all
+// follow the exact same "forget it at the end of the day" rule.
 //
 // Implementation: rather than computing the exact ms until next local
 // midnight and rescheduling around it (fiddly to get right across DST
@@ -36,8 +40,8 @@ export function startDailyConversationReset() {
     lastSeenDateKey = todayKey; // set before the await so a slow clear can't cause a double-fire on the next tick
 
     try {
-      await clearConversationHistory();
-      console.log(`Conversation history reset for new day: ${previousKey} -> ${todayKey} (${getTimezone()}).`);
+      await clearAllChannelConversationHistories();
+      console.log(`Conversation history reset for new day (all channels): ${previousKey} -> ${todayKey} (${getTimezone()}).`);
     } catch (err) {
       logError('daily conversation reset failed', err);
     }

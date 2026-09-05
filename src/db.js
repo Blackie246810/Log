@@ -33,7 +33,7 @@ pool.on('error', (err) => {
 // ---------------------------------------------------------------------------
 
 export async function getConstantsRow() {
-  const { rows } = await pool.query(`SELECT "Currency" AS "currency", "Timezone" AS "timezone" FROM "Constants" WHERE "Id" = 1`);
+  const { rows } = await pool.query(`SELECT "Currency" AS "currency", "Timezone" AS "timezone", "AiLevel" AS "level" FROM "Constants" WHERE "Id" = 1`);
   return rows[0] ?? null;
 }
 
@@ -50,6 +50,19 @@ export async function updateTimezoneRow(timezone) {
     `INSERT INTO "Constants" ("Id", "Currency", "Timezone") VALUES (1, 'INR', $1)
      ON CONFLICT ("Id") DO UPDATE SET "Timezone" = EXCLUDED."Timezone"`,
     [timezone]
+  );
+}
+
+// Backs /level (see commands/level.js, modals/levelModal.js). Stores only
+// the bare number Ameen entered (e.g. "3.5") — resolving that to an actual
+// model id is ai/modelLevels.js's job, kept out of the DB layer entirely.
+// Requires an "AiLevel" TEXT column on "Constants" — add it once via:
+//   ALTER TABLE "Constants" ADD COLUMN "AiLevel" TEXT;
+export async function updateLevelRow(level) {
+  await pool.query(
+    `INSERT INTO "Constants" ("Id", "Currency", "Timezone", "AiLevel") VALUES (1, 'INR', 'Asia/Kolkata', $1)
+     ON CONFLICT ("Id") DO UPDATE SET "AiLevel" = EXCLUDED."AiLevel"`,
+    [level]
   );
 }
 
@@ -411,8 +424,8 @@ export async function runReadOnlyQuery(sql, params) {
 // choices never being able to defeat it.
 // ---------------------------------------------------------------------------
 
-const MAX_MEMORY_ROWS = 40;
-const MAX_MEMORY_VALUE_LENGTH = 300;
+const MAX_MEMORY_ROWS = 60;
+const MAX_MEMORY_VALUE_LENGTH = 600;
 
 function normalizeMemoryKey(key) {
   return String(key ?? '').trim().toLowerCase();
@@ -461,23 +474,133 @@ export async function deleteMemory(key) {
   return rows.length > 0;
 }
 
-export async function getConversationHistory() {
+// Bumps "Updated at" for the given keys only — called when the AI reports it
+// actually drew on those specific facts while answering, NOT on every read.
+// getMemories() sends the whole table on every single message, so touching
+// "Updated at" there would stamp all rows at once and erase any distinction
+// between them; this exists precisely so eviction in upsertMemory's backstop
+// tracks real usage (facts the model actually leaned on) rather than mere
+// presence in context (facts that were sent but ignored).
+export async function touchMemories(keys) {
+  const normalizedKeys = (Array.isArray(keys) ? keys : [])
+    .map(normalizeMemoryKey)
+    .filter(Boolean);
+  if (normalizedKeys.length === 0) return { touched: [] };
+
   const { rows } = await pool.query(
-    `SELECT "Content" AS "content" FROM "Conversations" WHERE "Id" = 1`
+    `UPDATE "Memories" SET "Updated at" = now() WHERE "Key" = ANY($1::text[]) RETURNING "Key" AS "key"`,
+    [normalizedKeys]
   );
-  return rows[0]?.content ?? [];
+  return { touched: rows.map((r) => r.key) };
 }
 
-export async function saveConversationHistory(content) {
+// Per-channel conversation history — one row per Discord channel (a DM or
+// a server channel) the bot has ever replied in, keyed by that channel's
+// own Discord ID. A channel's ID never changes; its display name can (a
+// server channel gets renamed, a DM partner changes their username), so
+// the name is stored purely for readability when looking at the table
+// directly — it is never used to look a row up, only "ChannelId" is. A row
+// is created automatically the first time the bot ever saves history for
+// that channel (see saveChannelConversationHistory below) — nothing needs
+// to be provisioned ahead of time for a brand new channel or a first-ever
+// DM. Each row's "Content" column holds the same { messages, pending }
+// shape the old single global history used:
+//   - messages: the lean, completed-turn conversation history for that
+//     channel only — just user/model text pairs, no dynamic context or
+//     tool-call noise.
+//   - pending: null normally; set to a snapshot of the exact in-flight
+//     request (see ai/gemini.js) whenever a turn gets cut off by an error
+//     before the model ever replied — e.g. high demand, a timed-out
+//     request, every API key exhausted. Pinging again in that SAME channel
+//     resumes exactly that request instead of losing it.
+export async function ensureChannelConversationsTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS "ChannelConversations" (
+      "ChannelId" TEXT PRIMARY KEY,
+      "ChannelName" TEXT,
+      "Content" JSONB NOT NULL DEFAULT '{"messages": [], "pending": null}'::jsonb,
+      "UpdatedAt" TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `);
+}
+
+export async function getChannelConversationHistory(channelId) {
+  const { rows } = await pool.query(
+    `SELECT "Content" AS "content" FROM "ChannelConversations" WHERE "ChannelId" = $1`,
+    [channelId]
+  );
+  const stored = rows[0]?.content;
+  if (!stored) return { messages: [], pending: null };
+  if (Array.isArray(stored)) return { messages: stored, pending: null };
+  return { messages: stored.messages ?? [], pending: stored.pending ?? null };
+}
+
+export async function saveChannelConversationHistory(channelId, channelName, messages, pending = null) {
   await pool.query(
-    `INSERT INTO "Conversations" ("Id", "Content", "Updated at")
-     VALUES (1, $1, now())
-     ON CONFLICT ("Id")
-     DO UPDATE SET "Content" = EXCLUDED."Content", "Updated at" = now()`,
-    [JSON.stringify(content)]
+    `INSERT INTO "ChannelConversations" ("ChannelId", "ChannelName", "Content", "UpdatedAt")
+     VALUES ($1, $2, $3, now())
+     ON CONFLICT ("ChannelId") DO UPDATE
+     SET "ChannelName" = EXCLUDED."ChannelName", "Content" = EXCLUDED."Content", "UpdatedAt" = now()`,
+    [channelId, channelName ?? null, JSON.stringify({ messages, pending })]
   );
 }
 
-export async function clearConversationHistory() {
-  await pool.query(`DELETE FROM "Conversations" WHERE "Id" = 1`);
+// Used by /clear — wipes only the channel it was run in. Each channel's
+// conversation is independent now, so clearing one shouldn't touch any
+// other channel's history.
+export async function clearChannelConversationHistory(channelId) {
+  await pool.query(`DELETE FROM "ChannelConversations" WHERE "ChannelId" = $1`, [channelId]);
+}
+
+// Used by the daily reset (conversationReset.js) — every channel's history
+// starts a clean slate together, once per local calendar day, same as the
+// single global history used to.
+export async function clearAllChannelConversationHistories() {
+  await pool.query(`DELETE FROM "ChannelConversations"`);
+}
+
+// ---------------------------------------------------------------------------
+// Message cursors — one row per channel the owner has ever messaged the bot
+// in, remembering the newest message ID this process has ever handed to the
+// message handler there. This is what lets the bot catch up on messages
+// that arrived while it was offline (crashed, redeploying, etc.): Discord
+// keeps every message on its own side regardless of whether this bot was
+// connected, but a fresh gateway session never backfills old messageCreate
+// events on its own — something has to remember where we left off and go
+// fetch the gap. See missedMessages.js for the catch-up logic that reads
+// this; setMessageCursor is called for every live message too (see bot.js)
+// so the pointer never falls behind.
+// ---------------------------------------------------------------------------
+
+export async function ensureMessageCursorTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS "MessageCursors" (
+      "ChannelId" TEXT PRIMARY KEY,
+      "LastMessageId" TEXT NOT NULL,
+      "UpdatedAt" TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `);
+}
+
+export async function getAllMessageCursors() {
+  const { rows } = await pool.query(
+    `SELECT "ChannelId" AS "channelId", "LastMessageId" AS "lastMessageId" FROM "MessageCursors"`
+  );
+  return rows;
+}
+
+// Snowflake IDs sort correctly as plain strings for a very long time (they're
+// all the same digit-length within any realistic window), but casting to
+// bigint for the comparison costs nothing and removes that assumption —
+// this only ever advances the cursor forward, even if an older/out-of-order
+// event somehow lands after a newer one.
+export async function setMessageCursor(channelId, messageId) {
+  await pool.query(
+    `INSERT INTO "MessageCursors" ("ChannelId", "LastMessageId", "UpdatedAt")
+     VALUES ($1, $2, now())
+     ON CONFLICT ("ChannelId") DO UPDATE
+     SET "LastMessageId" = EXCLUDED."LastMessageId", "UpdatedAt" = now()
+     WHERE "MessageCursors"."LastMessageId"::bigint < EXCLUDED."LastMessageId"::bigint`,
+    [channelId, messageId]
+  );
 }

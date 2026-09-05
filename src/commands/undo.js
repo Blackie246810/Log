@@ -1,7 +1,8 @@
-import { SlashCommandBuilder, EmbedBuilder, InteractionContextType } from 'discord.js';
+import { SlashCommandBuilder, InteractionContextType } from 'discord.js';
 import { undoLastEntry } from '../db.js';
 import { getCurrency } from '../constantsStore.js';
 import { logError, errorDetail } from '../errorReporter.js';
+import { buildUndoEmbed } from '../embeds.js';
 
 export const data = new SlashCommandBuilder()
   .setName('undo')
@@ -17,19 +18,7 @@ export async function execute(interaction) {
     }
 
     const { deleted, restored } = result;
-    const sign = deleted.type === 'income' ? '+' : '-';
-    const deletedCurrency = deleted.currency ?? getCurrency();
-    const restoredCurrency = restored.currency ?? getCurrency();
-    const embed = new EmbedBuilder()
-      .setColor(0xf39c12)
-      .setTitle(`Undone: entry #${deleted.id}`)
-      .setDescription(`${sign}${deletedCurrency} ${Number(deleted.amount).toFixed(2)} · ${deleted.category} · ${deleted.paymentMode}`)
-      .addFields(
-        { name: 'Cash', value: `${restoredCurrency} ${restored.cashBalance.toFixed(2)}`, inline: true },
-        { name: 'Card', value: `${restoredCurrency} ${restored.cardBalance.toFixed(2)}`, inline: true },
-        { name: 'Total', value: `${restoredCurrency} ${restored.total.toFixed(2)}`, inline: true },
-      )
-      .setTimestamp();
+    const embed = buildUndoEmbed(deleted, restored, getCurrency());
 
     await interaction.reply({ embeds: [embed] });
   } catch (err) {

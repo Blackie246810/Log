@@ -78,7 +78,17 @@ function isSupportedMimeType(mimeType) {
 // sanitize conversation history — see gemini.js). Anything skipped is
 // reported back as a human-readable warning instead of failing the whole
 // message.
-export async function buildAttachmentParts(message) {
+//
+// `budget` is optional and lets a caller share the MAX_FILES/MAX_TOTAL_BYTES
+// limits across more than one call — e.g. a message's own attachments and
+// the attachments on whatever message it's replying to (see
+// replyContext.js) both end up inlined into the *same* Gemini request, so
+// they must fit under one combined cap rather than each getting their own
+// budget and doubling the effective limit. Pass the same object into two
+// calls and it's mutated in place so the second call sees what the first
+// one already spent. Left unset, each call gets its own fresh budget
+// (today's single-call behavior).
+export async function buildAttachmentParts(message, budget = { totalBytes: 0, count: 0 }) {
   const parts = [];
   const meta = [];
   const warnings = [];
@@ -87,13 +97,10 @@ export async function buildAttachmentParts(message) {
     return { parts, meta, warnings };
   }
 
-  let totalBytes = 0;
-  let count = 0;
-
   for (const attachment of message.attachments.values()) {
-    if (count >= MAX_FILES) {
+    if (budget.count >= MAX_FILES) {
       warnings.push(
-        `${attachment.name}: skipped — max ${MAX_FILES} files per message. Send it in a follow-up message instead.`
+        `${attachment.name}: skipped — max ${MAX_FILES} files per request (this message plus any message it's replying to). Send it in a follow-up message instead.`
       );
       continue;
     }
@@ -114,10 +121,10 @@ export async function buildAttachmentParts(message) {
       continue;
     }
 
-    if (totalBytes + attachment.size > MAX_TOTAL_BYTES) {
+    if (budget.totalBytes + attachment.size > MAX_TOTAL_BYTES) {
       const totalMb = Math.floor(MAX_TOTAL_BYTES / (1024 * 1024));
       warnings.push(
-        `${attachment.name}: skipped — this message's attachments add up to more than ${totalMb}MB combined. Send this file on its own or split the files across separate messages.`
+        `${attachment.name}: skipped — these attachments add up to more than ${totalMb}MB combined (this message plus any message it's replying to). Send this file on its own or split the files across separate messages.`
       );
       continue;
     }
@@ -135,8 +142,8 @@ export async function buildAttachmentParts(message) {
 
       parts.push({ inlineData: { mimeType, data: base64 } });
       meta.push({ name: attachment.name, mimeType });
-      totalBytes += attachment.size;
-      count++;
+      budget.totalBytes += attachment.size;
+      budget.count++;
     } catch (err) {
       logError('buildAttachmentParts: download failed', err);
       warnings.push(`${attachment.name}: skipped — couldn't download it. Try resending, or re-upload if the issue persists.`);

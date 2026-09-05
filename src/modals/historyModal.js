@@ -5,6 +5,12 @@ import { logError, errorDetail } from '../errorReporter.js';
 
 export const customId = 'history-modal';
 
+// Plain whole number only — "10", not "1e1" or "0x10" or "3.0" — which
+// Number()'s own parsing would otherwise silently accept alongside real
+// decimal input. Same style of fix as the amount-field tightening in
+// logFieldsValidation.js.
+const COUNT_PATTERN = /^\d+$/;
+
 export async function handle(interaction) {
   const rawCount = interaction.fields.getTextInputValue('count').trim();
 
@@ -13,7 +19,7 @@ export async function handle(interaction) {
     count = 10;
   } else {
     count = Number(rawCount);
-    if (!Number.isInteger(count) || count < 1 || count > 25) {
+    if (!COUNT_PATTERN.test(rawCount) || !Number.isInteger(count) || count < 1 || count > 25) {
       const errorText = `Unexpected value for [count]\nexpected values: a whole number from 1 to 25\ngiven value: ${rawCount}`;
       logError('history-modal validation', errorText);
       await interaction.reply({ content: errorText });

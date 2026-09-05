@@ -3,7 +3,20 @@ import { askAi, AllKeysExhaustedError } from './ai/gemini.js';
 import { logError, describeError, redactVendorNames } from './errorReporter.js';
 import { renderTableImages, MAX_TABLES_PER_MESSAGE } from './tableImage.js';
 import { buildAttachmentParts } from './ai/attachments.js';
+import { buildReplyContext } from './ai/replyContext.js';
 import { extractFileAttachments } from './ai/outgoingFiles.js';
+
+// Purely cosmetic: a human-readable label for the ChannelConversations row
+// (see db.js) so the table is readable at a glance. Never used to look a
+// row up — that's always the channel's own Discord ID, which (unlike a
+// name) never changes.
+function describeChannel(channel) {
+  if (!channel) return null;
+  if (channel.isDMBased?.()) {
+    return `DM: ${channel.recipient?.username ?? channel.recipient?.tag ?? 'unknown user'}`;
+  }
+  return channel.name ? `#${channel.name}` : `channel ${channel.id}`;
+}
 
 const DISCORD_MESSAGE_LIMIT = 2000;
 const TYPING_REFRESH_MS = 8000;
@@ -152,40 +165,25 @@ function splitTextIntoChunks(text, limit = DISCORD_MESSAGE_LIMIT) {
   return chunks;
 }
 
-export async function handleAiMessage(message) {
-  if (message.author.bot) return;
-  if (message.author.id !== process.env.DISCORD_OWNER_ID) return;
-
-  const text = message.content?.trim() ?? '';
-  // Attachments (receipts, statements, screenshots, ...) can carry the
-  // whole request on their own, so a message isn't ignored just because
-  // it has no text — only when it has neither text nor any attachments.
-  if (!text && message.attachments.size === 0) return;
-
-  const { parts: attachmentParts, meta: attachmentMeta, warnings: attachmentWarnings } = await buildAttachmentParts(message);
-
-  // Every attachment got skipped (unsupported/too large/etc.) and there's
-  // no text to fall back on — nothing to actually send the AI, so just
-  // report why instead of asking it to answer an empty message.
-  if (!text && attachmentParts.length === 0) {
-    try {
-      await message.reply(`Couldn't use any of those files:\n${attachmentWarnings.map((w) => `- ${w}`).join('\n')}`);
-    } catch (err) {
-      logError('ai message handler: attachment-skip reply failed', err);
-    }
-    return;
-  }
-
+// The actual "run one AI turn and post the reply" machinery — placeholder,
+// loaders, the askAi call itself, splitting the reply into table images /
+// files / text chunks, and error handling. Factored out so both a single
+// live message (handleAiMessage) and a whole batch of backlog messages
+// (handleAiMessageBatch, below) go through the exact same posting logic —
+// the only difference between them is how promptText/attachments get
+// built up front. `replyTo` is the Discord message the placeholder and
+// any error reply attach to; `channel` is where follow-up chunks get sent.
+async function runAiTurn({ replyTo, channel, client, promptText, attachmentParts, attachmentMeta, attachmentWarnings }) {
   let placeholder;
   try {
-    placeholder = await message.reply('Thinking');
+    placeholder = await replyTo.reply('Thinking');
   } catch (err) {
     logError('ai message handler: placeholder send failed', err);
     return;
   }
 
   const typingInterval = setInterval(() => {
-    message.channel.sendTyping().catch(() => {
+    channel.sendTyping().catch(() => {
       // cosmetic only
     });
   }, TYPING_REFRESH_MS);
@@ -195,7 +193,15 @@ export async function handleAiMessage(message) {
   let answeringLoader = null;
 
   try {
-    const reply = await askAi(text, message.client.user.username, undefined, attachmentParts, attachmentMeta);
+    const { text: reply, cards } = await askAi(
+      promptText,
+      client.user.username,
+      undefined,
+      attachmentParts,
+      attachmentMeta,
+      channel.id,
+      describeChannel(channel)
+    );
     await thinkingLoader.stop();
 
     answeringLoader = createLoaderAnimator(placeholder, ANSWERING_WORDS);
@@ -224,17 +230,22 @@ export async function handleAiMessage(message) {
     const firstPayload = {};
     if (textChunks[0]) firstPayload.content = textChunks[0];
     if (attachmentChunks[0]) firstPayload.files = attachmentChunks[0];
-    if (!firstPayload.content && !firstPayload.files) firstPayload.content = "Here's what I found.";
+    // Discord embeds, e.g. a log/undo confirmation card — built from the
+    // real DB write in tools.js, never authored by the model. Riding on
+    // the same message as the model's own confirmation text, exactly like
+    // /log and /undo show their embed alongside a reply of their own.
+    if (cards.length) firstPayload.embeds = cards;
+    if (!firstPayload.content && !firstPayload.files && !firstPayload.embeds) firstPayload.content = "Here's what I found.";
 
     await answeringLoader.stop();
     await placeholder.edit(firstPayload);
 
     for (let i = 1; i < textChunks.length; i++) {
-      await message.channel.send({ content: textChunks[i] });
+      await channel.send({ content: textChunks[i] });
     }
 
     for (let i = 1; i < attachmentChunks.length; i++) {
-      await message.channel.send({
+      await channel.send({
         content: `-# continued (${i + 1}/${attachmentChunks.length})`,
         files: attachmentChunks[i],
       });
@@ -252,10 +263,14 @@ export async function handleAiMessage(message) {
     // that generic path would otherwise forward the raw provider error,
     // which often contains a doc URL that Discord auto-unfurls into a
     // distracting link-preview card.
-    const text = err instanceof AllKeysExhaustedError
+    const errorText = err instanceof AllKeysExhaustedError
       ? err.message
       : `Something went wrong: ${redactVendorNames(describeError(err).message)}`;
-    await placeholder.edit(text);
+    // askAi snapshots exactly what it was doing before rethrowing here (see
+    // the catch block around its generateContent call) — whatever it was
+    // asking or about to do is safely parked, so a later ping (even a bare
+    // one) resumes it instead of starting over.
+    await placeholder.edit(`${errorText}\n\n-# Ping me again once this clears up — I'll pick up right where I left off.`);
   } finally {
     clearInterval(typingInterval);
     // Idempotent safety net — both loaders are already stopped on every
@@ -264,4 +279,166 @@ export async function handleAiMessage(message) {
     await thinkingLoader.stop();
     if (answeringLoader) await answeringLoader.stop();
   }
+}
+
+export async function handleAiMessage(message) {
+  if (message.author.bot) return;
+  if (message.author.id !== process.env.DISCORD_OWNER_ID) return;
+
+  // A message that's just a mention of the bot (whitespace aside) still
+  // has non-empty `content` — the raw "<@id>" markup — so it's stripped
+  // out here rather than sent to the AI as a literal prompt. This is the
+  // "just ping it" gesture: on its own it carries no new request, but it
+  // still needs to reach askAi (see the early guard just below) so a turn
+  // that got interrupted by high demand or an error can resume — askAi is
+  // what actually knows whether there's anything to pick back up.
+  const mentionsBotOnly = new RegExp(`^(<@!?${message.client.user.id}>\\s*)+$`).test(message.content ?? '');
+  const rawText = message.content?.trim() ?? '';
+  const text = mentionsBotOnly ? '' : rawText;
+  // Attachments (receipts, statements, screenshots, ...) can carry the
+  // whole request on their own, so a message isn't ignored just because
+  // it has no text — only when it has neither text nor any attachments,
+  // and isn't a bare ping either (a bare ping still needs to reach askAi,
+  // which is what actually knows whether there's an interrupted turn to
+  // resume).
+  if (!text && message.attachments.size === 0 && !mentionsBotOnly) return;
+
+  // A reply's own attachments and whatever it's replying to both end up
+  // inlined into the same Gemini request, so they share one file-count/
+  // size budget rather than each getting the full limit to itself (see
+  // buildAttachmentParts). The current message is built first so it keeps
+  // first claim on that budget, same as before this feature existed;
+  // buildReplyContext spends whatever's left.
+  const attachmentBudget = { totalBytes: 0, count: 0 };
+  const { parts: ownAttachmentParts, meta: ownAttachmentMeta, warnings: ownAttachmentWarnings } = await buildAttachmentParts(message, attachmentBudget);
+  const replyContext = await buildReplyContext(message, attachmentBudget);
+
+  const attachmentParts = [...(replyContext?.parts ?? []), ...ownAttachmentParts];
+  const attachmentMeta = [...(replyContext?.meta ?? []), ...ownAttachmentMeta];
+  const attachmentWarnings = [...(replyContext?.warnings ?? []), ...ownAttachmentWarnings];
+
+  // Every attachment got skipped (unsupported/too large/etc.), there's no
+  // text to fall back on, and this isn't a reply to anything either —
+  // nothing to actually send the AI, so just report why instead of asking
+  // it to answer an empty message. A reply still has the referenced
+  // message's own content to go on even without extra text of its own, so
+  // that case is allowed through. A bare ping is allowed through too — it
+  // never had attachments to skip in the first place, and it still needs
+  // to reach askAi so an interrupted turn can resume.
+  if (!text && !replyContext && attachmentParts.length === 0 && !mentionsBotOnly) {
+    try {
+      await message.reply(`Couldn't use any of those files:\n${attachmentWarnings.map((w) => `- ${w}`).join('\n')}`);
+    } catch (err) {
+      logError('ai message handler: attachment-skip reply failed', err);
+    }
+    return;
+  }
+
+  // Fold the replied-to message's context in ahead of the user's own text
+  // rather than changing askAi's signature — it's just more text in the
+  // same turn, structurally no different from the user pasting a quote in
+  // themselves, just gathered for them.
+  const promptText = replyContext
+    ? `${replyContext.contextText}\n\n# The user's message (about the above)\n${text || '(no additional text — see attachments, if any, on this message)'}`
+    : text;
+
+  await runAiTurn({
+    replyTo: message,
+    channel: message.channel,
+    client: message.client,
+    promptText,
+    attachmentParts,
+    attachmentMeta,
+    attachmentWarnings,
+  });
+}
+
+// Catch-up entry point for a channel that has MORE THAN ONE owner message
+// waiting after a restart/reconnect (see missedMessages.js). Firing
+// handleAiMessage once per backlog message would mean one Gemini call, one
+// "Thinking..." placeholder, and one reply PER message — slow (they'd have
+// to run strictly one after another so each sees the last one's reply in
+// history), expensive, and it floods the channel with replies to what was
+// very likely a single continuous thought split across several sends.
+// Instead every backlog message's text/attachments/reply-context are
+// folded into ONE prompt, oldest first, and answered with a single turn —
+// the model is explicitly told there are several messages and asked to
+// address each. A batch of exactly one message is just handleAiMessage.
+export async function handleAiMessageBatch(messages) {
+  if (messages.length === 0) return;
+  if (messages.length === 1) {
+    await handleAiMessage(messages[0]);
+    return;
+  }
+
+  const lastMessage = messages[messages.length - 1];
+  const channel = lastMessage.channel;
+  const botUserId = lastMessage.client.user.id;
+
+  // Shared across every message in the batch, same reasoning as the
+  // single-message path sharing one budget between a message and whatever
+  // it's replying to (see buildAttachmentParts): all of it lands in one
+  // Gemini request, so it all has to fit under one combined cap rather
+  // than each message getting the full limit to itself.
+  const attachmentBudget = { totalBytes: 0, count: 0 };
+  const attachmentParts = [];
+  const attachmentMeta = [];
+  const attachmentWarnings = [];
+  const segments = [];
+
+  for (const message of messages) {
+    const mentionsBotOnly = new RegExp(`^(<@!?${botUserId}>\\s*)+$`).test(message.content ?? '');
+    const rawText = message.content?.trim() ?? '';
+    const text = mentionsBotOnly ? '' : rawText;
+
+    const { parts: ownParts, meta: ownMeta, warnings: ownWarnings } = await buildAttachmentParts(message, attachmentBudget);
+    const replyContext = await buildReplyContext(message, attachmentBudget);
+
+    attachmentParts.push(...(replyContext?.parts ?? []), ...ownParts);
+    attachmentMeta.push(...(replyContext?.meta ?? []), ...ownMeta);
+    attachmentWarnings.push(...(replyContext?.warnings ?? []), ...ownWarnings);
+
+    // Same "nothing usable here" check as the single-message path — skip
+    // this one message rather than the whole batch; the others may still
+    // have real content.
+    if (!text && !replyContext && ownParts.length === 0 && !mentionsBotOnly) continue;
+
+    const timestamp = new Date(message.createdTimestamp).toLocaleString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+    const body = replyContext
+      ? `${replyContext.contextText}\n\n${text || '(no additional text on this message — see attachments, if any)'}`
+      : text || (ownParts.length ? '(no text — see attached file(s) on this message)' : '(just a ping)');
+    segments.push(`[${timestamp}] ${body}`);
+  }
+
+  // Every backlog message turned out to be unusable on its own (e.g. all
+  // bare pings with attachments that got skipped) — nothing worth sending
+  // the AI. Rather than silently doing nothing, still surface the warnings
+  // so the owner knows files were dropped.
+  if (segments.length === 0) {
+    if (attachmentWarnings.length) {
+      try {
+        await lastMessage.reply(`Caught up on ${messages.length} messages, but couldn't use any of the attached files:\n${attachmentWarnings.map((w) => `- ${w}`).join('\n')}`);
+      } catch (err) {
+        logError('ai message handler (batch): attachment-skip reply failed', err);
+      }
+    }
+    return;
+  }
+
+  const promptText = `# ${messages.length} messages sent to you in this channel while you were offline, oldest first. Reply once, addressing each in turn.\n\n${segments.join('\n\n---\n\n')}`;
+
+  await runAiTurn({
+    replyTo: lastMessage,
+    channel,
+    client: lastMessage.client,
+    promptText,
+    attachmentParts,
+    attachmentMeta,
+    attachmentWarnings,
+  });
 }

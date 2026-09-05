@@ -17,11 +17,35 @@ import { CATEGORIES, PAYMENT_MODES, PAYMENT_FLOWS, matchCanonical, parseDateTime
 // createdAt } } with everything already canonicalized/parsed, or
 // { ok: false, errorText } ready to hand straight to interaction.reply.
 export function validateLogFields(fields, timezone) {
-  const rawDate = fields.getTextInputValue('date').trim();
-  const rawCategory = fields.getTextInputValue('category').trim();
-  const rawAmount = fields.getTextInputValue('amount').trim();
-  const rawPaymentMode = fields.getTextInputValue('payment_mode').trim();
-  const rawPaymentFlow = fields.getTextInputValue('payment_flow').trim();
+  return validateLogValues(
+    {
+      date: fields.getTextInputValue('date').trim(),
+      category: fields.getTextInputValue('category').trim(),
+      amount: fields.getTextInputValue('amount').trim(),
+      paymentMode: fields.getTextInputValue('payment_mode').trim(),
+      paymentFlow: fields.getTextInputValue('payment_flow').trim(),
+    },
+    timezone
+  );
+}
+
+// The actual rules, decoupled from Discord's ModalSubmitFields — takes
+// plain strings directly. This is what lets the AI's log_transaction tool
+// (see ai/tools.js) enforce the exact same validation /log and /edit do,
+// rather than a second, potentially-drifting copy of the rules.
+// Plain decimal only — "450", "450.75" — never scientific notation ("4.5e2")
+// or other numeric-literal forms JS's Number() would otherwise happily
+// parse; those are technically valid amounts but no user actually intends
+// to type them, and letting them through means the number quietly stored
+// isn't the number displayed back. Same rule /level's NUMBER_PATTERN uses.
+const AMOUNT_PATTERN = /^\d+(\.\d+)?$/;
+
+export function validateLogValues(input, timezone) {
+  const rawDate = String(input.date ?? '').trim();
+  const rawCategory = String(input.category ?? '').trim();
+  const rawAmount = String(input.amount ?? '').trim();
+  const rawPaymentMode = String(input.paymentMode ?? '').trim();
+  const rawPaymentFlow = String(input.paymentFlow ?? '').trim();
 
   const errorBlocks = [];
 
@@ -40,7 +64,7 @@ export function validateLogFields(fields, timezone) {
   }
 
   const amountNum = Number(rawAmount);
-  const amountValid = Number.isFinite(amountNum) && amountNum > 0;
+  const amountValid = AMOUNT_PATTERN.test(rawAmount) && Number.isFinite(amountNum) && amountNum > 0;
   if (!amountValid) {
     errorBlocks.push(
       `Unexpected value for [amount]\nexpected values: a positive number\ngiven value: ${rawAmount}`

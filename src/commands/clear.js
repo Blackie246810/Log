@@ -44,18 +44,20 @@ export async function execute(interaction) {
 
   // Forget the underlying conversation too, not just the visible Discord
   // messages — otherwise the AI would still remember everything said so
-  // far even after the messages themselves are gone. Kept as its own
+  // far even after the messages themselves are gone. Each channel now
+  // keeps its own independent conversation (see db.js's
+  // ChannelConversations table), so this only wipes THIS channel's
+  // history, not every channel the bot talks to. Kept as its own
   // try/catch so a failure here doesn't block deleting the visible
   // messages below (or vice versa).
   let historyCleared = true;
   try {
-    await clearConversation();
+    await clearConversation(channel.id);
   } catch (err) {
     historyCleared = false;
     logError('clear command: conversation reset', err);
   }
 
-  let deletedCount = 0;
   let cursor;
 
   try {
@@ -85,7 +87,6 @@ export async function execute(interaction) {
         if (bulkable.length >= 2) {
           try {
             const deleted = await channel.bulkDelete(bulkable, true);
-            deletedCount += deleted.size;
             // Anything bulkDelete silently skipped (e.g. it turned out to be
             // right at the 14-day edge) still needs an individual attempt.
             const missed = bulkable.filter((m) => !deleted.has(m.id));
@@ -101,7 +102,6 @@ export async function execute(interaction) {
         for (const msg of individual) {
           try {
             await msg.delete();
-            deletedCount++;
           } catch (err) {
             logError('clear command message delete', err);
           }
@@ -112,14 +112,23 @@ export async function execute(interaction) {
     }
 
     const historyNote = historyCleared
-      ? " I've also forgotten our conversation so far — we're starting fresh."
-      : " I wasn't able to reset our conversation memory just now, though — might still remember earlier context.";
-    const scopeNote = isDM
-      ? " Your own messages are untouched — Discord doesn't allow a bot to delete another user's messages in a DM."
-      : '';
-    await interaction.editReply({
-      content: `Cleared ${deletedCount} message${deletedCount === 1 ? '' : 's'}.${scopeNote}${historyNote}`,
-    });
+      ? ''
+      : "Heads up: I wasn't able to reset our conversation memory just now — might still remember earlier context.";
+
+    // Success leaves nothing behind — no "Cleared N messages" summary, and
+    // the deferred reply itself (the "BotName is thinking..." placeholder)
+    // is deleted rather than edited into one. If the history reset silently
+    // failed above, that's still worth surfacing rather than staying quiet
+    // about it, so that one case still gets a message.
+    if (historyNote) {
+      await interaction.editReply({ content: historyNote });
+    } else {
+      try {
+        await interaction.deleteReply();
+      } catch (err) {
+        logError('clear command: deleting the deferred reply failed', err);
+      }
+    }
   } catch (err) {
     logError('clear command', err);
     await interaction.editReply({ content: `Something went wrong while clearing messages — ${errorDetail(err)}` });
