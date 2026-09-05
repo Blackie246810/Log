@@ -40,7 +40,7 @@ export async function handle(interaction) {
 
   const dateInput = new TextInputBuilder()
     .setCustomId('date').setLabel('Date & Time (DD-MM-YYYY HH:MM, 24H Format)').setStyle(TextInputStyle.Short)
-    .setPlaceholder(`e.g. 22-08-2026 14:30 (${log.timezone})`)
+    .setPlaceholder(`Format: DD-MM-YYYY HH:MM, in ${log.timezone}`)
     .setValue(formatDateTimeDDMMYYYY(new Date(log.createdAt), log.timezone)).setRequired(true);
 
   const categoryInput = new TextInputBuilder()

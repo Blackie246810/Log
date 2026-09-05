@@ -1,5 +1,5 @@
 import { getAllMessageCursors, setMessageCursor } from './db.js';
-import { logError } from './errorReporter.js';
+import { logError, errorDetail } from './errorReporter.js';
 
 // Discord keeps every message it ever receives regardless of whether this
 // bot's gateway connection was up — nothing is lost on Discord's side while
@@ -61,7 +61,27 @@ export async function catchUpMissedMessages(client, processOwnerMessages) {
       // shouldn't stop the rest from being checked — move on to the next
       // channel rather than aborting the whole catch-up run.
       logError(`catchUpMissedMessages: channel ${channelId} failed`, err);
+      await notifyChannelOfCatchUpError(client, channelId, err);
     }
+  }
+}
+
+// Best-effort: posts the error straight into the channel that actually
+// caused it, rather than only logging to the console or defaulting to a
+// DM — the channel may well still be reachable even though something
+// about catching it up failed (e.g. a transient DB error persisting the
+// cursor, not the channel itself being gone). If the channel genuinely
+// can't be reached either, this just stays a console log, same as before —
+// there's no meaningful "owner" channel to fall back to for a catch-up
+// pass that hasn't identified any live message to reply to yet.
+async function notifyChannelOfCatchUpError(client, channelId, err) {
+  try {
+    const channel = await client.channels.fetch(channelId).catch(() => null);
+    if (channel && channel.isTextBased()) {
+      await channel.send(`Something went wrong catching up on missed messages here — ${errorDetail(err)}`);
+    }
+  } catch (notifyErr) {
+    logError('catchUpMissedMessages: failed to notify channel of catch-up error', notifyErr);
   }
 }
 
@@ -115,5 +135,6 @@ async function catchUpChannel(client, channelId, afterId, ownerId, processOwnerM
     await processOwnerMessages(backlog);
   } catch (err) {
     logError(`catchUpMissedMessages: processing ${backlog.length} message(s) in channel ${channelId} failed`, err);
+    await notifyChannelOfCatchUpError(client, channelId, err);
   }
 }

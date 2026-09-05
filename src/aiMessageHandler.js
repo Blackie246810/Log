@@ -1,10 +1,11 @@
 import { AttachmentBuilder } from 'discord.js';
-import { askAi, AllKeysExhaustedError } from './ai/gemini.js';
+import { askAi, AllKeysExhaustedError, isOverloadedError } from './ai/gemini.js';
 import { logError, describeError, redactVendorNames } from './errorReporter.js';
 import { renderTableImages, MAX_TABLES_PER_MESSAGE } from './tableImage.js';
 import { buildAttachmentParts } from './ai/attachments.js';
 import { buildReplyContext } from './ai/replyContext.js';
 import { extractFileAttachments } from './ai/outgoingFiles.js';
+import { beginTurn, attachPlaceholder, endTurn } from './inflightTurns.js';
 
 // Purely cosmetic: a human-readable label for the ChannelConversations row
 // (see db.js) so the table is readable at a glance. Never used to look a
@@ -19,6 +20,21 @@ function describeChannel(channel) {
 }
 
 const DISCORD_MESSAGE_LIMIT = 2000;
+
+// Shown when the underlying provider is temporarily overloaded (see
+// isOverloadedError in gemini.js). Deliberately generic — no mention of
+// "error", "AI", "model", or the actual cause — so it just reads as the
+// bot itself being briefly unavailable rather than surfacing what's
+// happening behind the scenes. One is picked at random each time so it
+// doesn't look like a canned, repeated response.
+const OVERLOAD_MESSAGES = [
+  "I'm unavailable right now — please try again later.",
+  "Can't get to that at the moment. Try again in a bit.",
+  "I'm not able to respond right now — check back soon.",
+  "Not available at the moment — please try again shortly.",
+  "I'm offline for the moment — give it another shot later.",
+];
+
 const TYPING_REFRESH_MS = 8000;
 const TABLE_BLOCK_RE = /```table\s*\n([\s\S]*?)\n```/gi;
 
@@ -138,6 +154,21 @@ function extractTableImages(text) {
 // a bigger result set (table images and/or ```file``` blocks, see
 // ai/outgoingFiles.js) means more messages, not more attachments crammed
 // into one. Splits the flat attachment list into legal-sized chunks.
+// Deletes a placeholder we're never going to put real content into,
+// because the turn behind it was cancelled (see inflightTurns.js) —
+// best-effort, since the message may already be gone (e.g. /clear already
+// wiped it along with the rest of the channel).
+async function silentlyDiscard(placeholder) {
+  try {
+    await placeholder.delete();
+  } catch (err) {
+    // Already deleted, or we lack permission — either way, this is a
+    // deliberately quiet no-op; a cancelled turn should leave nothing
+    // behind, but failing to clean up the placeholder isn't itself worth
+    // surfacing anywhere.
+  }
+}
+
 function chunkAttachments(attachments) {
   const chunks = [];
   for (let i = 0; i < attachments.length; i += MAX_TABLES_PER_MESSAGE) {
@@ -173,12 +204,32 @@ function splitTextIntoChunks(text, limit = DISCORD_MESSAGE_LIMIT) {
 // the only difference between them is how promptText/attachments get
 // built up front. `replyTo` is the Discord message the placeholder and
 // any error reply attach to; `channel` is where follow-up chunks get sent.
-async function runAiTurn({ replyTo, channel, client, promptText, attachmentParts, attachmentMeta, attachmentWarnings }) {
+// `triggerIds` are any additional Discord message ids (beyond replyTo's own,
+// which is always included) that should also be able to cancel this turn if
+// deleted or edited — used by the batch path below, where several backlog
+// messages all feed one combined reply. See inflightTurns.js: a turn
+// tracked here can be cancelled by a messageDelete/messageDeleteBulk on any
+// of its ids, by /clear wiping the channel, or restarted by a messageUpdate
+// on its triggering message — all wired up in bot.js.
+async function runAiTurn({ replyTo, channel, client, promptText, attachmentParts, attachmentMeta, attachmentWarnings, triggerIds = [] }) {
+  const turn = beginTurn(channel.id, [replyTo.id, ...triggerIds]);
+
   let placeholder;
   try {
     placeholder = await replyTo.reply('Thinking');
   } catch (err) {
     logError('ai message handler: placeholder send failed', err);
+    endTurn(turn);
+    return;
+  }
+  attachPlaceholder(turn, placeholder);
+
+  // Cancelled in the brief window between the turn starting and the
+  // placeholder actually landing (e.g. the triggering message was deleted,
+  // or /clear ran, right away) — nothing to show, just clean up quietly.
+  if (turn.cancelled) {
+    await silentlyDiscard(placeholder);
+    endTurn(turn);
     return;
   }
 
@@ -202,6 +253,17 @@ async function runAiTurn({ replyTo, channel, client, promptText, attachmentParts
       channel.id,
       describeChannel(channel)
     );
+
+    // The turn was cancelled while askAi was running (message deleted,
+    // /clear ran, or the triggering message was edited and a fresh turn
+    // already started in its place). The request finished, but nothing
+    // about its result should ever reach Discord — discard the
+    // placeholder and stop here rather than posting a stale answer.
+    if (turn.cancelled) {
+      await silentlyDiscard(placeholder);
+      return;
+    }
+
     await thinkingLoader.stop();
 
     answeringLoader = createLoaderAnimator(placeholder, ANSWERING_WORDS);
@@ -238,19 +300,39 @@ async function runAiTurn({ replyTo, channel, client, promptText, attachmentParts
     if (!firstPayload.content && !firstPayload.files && !firstPayload.embeds) firstPayload.content = "Here's what I found.";
 
     await answeringLoader.stop();
+
+    // Re-checked right before actually posting anything — the table/file
+    // extraction above is synchronous and fast, but this keeps the
+    // guarantee airtight regardless.
+    if (turn.cancelled) {
+      await silentlyDiscard(placeholder);
+      return;
+    }
+
     await placeholder.edit(firstPayload);
 
     for (let i = 1; i < textChunks.length; i++) {
+      if (turn.cancelled) break;
       await channel.send({ content: textChunks[i] });
     }
 
     for (let i = 1; i < attachmentChunks.length; i++) {
+      if (turn.cancelled) break;
       await channel.send({
         content: `-# continued (${i + 1}/${attachmentChunks.length})`,
         files: attachmentChunks[i],
       });
     }
   } catch (err) {
+    // Cancelled turns never surface an error message either — "abort it,
+    // don't respond, just ignore it" applies just as much to a failure as
+    // to a success. Just clean up and leave; the loaders/interval/turn
+    // teardown below in `finally` still runs.
+    if (turn.cancelled) {
+      await silentlyDiscard(placeholder);
+      return;
+    }
+
     logError('ai message handler', err);
     // Stop both loaders — and wait for any edit they already had in
     // flight — before writing the error message. Otherwise a stale
@@ -265,7 +347,9 @@ async function runAiTurn({ replyTo, channel, client, promptText, attachmentParts
     // distracting link-preview card.
     const errorText = err instanceof AllKeysExhaustedError
       ? err.message
-      : `Something went wrong: ${redactVendorNames(describeError(err).message)}`;
+      : isOverloadedError(err)
+        ? OVERLOAD_MESSAGES[Math.floor(Math.random() * OVERLOAD_MESSAGES.length)]
+        : `Something went wrong: ${redactVendorNames(describeError(err).message)}`;
     // askAi snapshots exactly what it was doing before rethrowing here (see
     // the catch block around its generateContent call) — whatever it was
     // asking or about to do is safely parked, so a later ping (even a bare
@@ -278,6 +362,7 @@ async function runAiTurn({ replyTo, channel, client, promptText, attachmentParts
     // unexpected throw happens between the try block and those calls.
     await thinkingLoader.stop();
     if (answeringLoader) await answeringLoader.stop();
+    endTurn(turn);
   }
 }
 
@@ -440,5 +525,8 @@ export async function handleAiMessageBatch(messages) {
     attachmentParts,
     attachmentMeta,
     attachmentWarnings,
+    // Any one of the batched backlog messages being deleted or edited
+    // should be able to cancel this combined reply, not just the last one.
+    triggerIds: messages.map((m) => m.id),
   });
 }

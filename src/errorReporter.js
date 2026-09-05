@@ -80,3 +80,25 @@ export async function reportError(client, context, err) {
     console.error('[errorReporter] failed to DM owner:', reportErr);
   }
 }
+
+// The channel-scoped counterpart to reportError above. Every error is tied
+// to whatever channel the owner was actually talking in when it happened —
+// that's where it should show up, not in a DM the owner has to go dig up
+// separately. This tries a plain message straight into that channel first;
+// only if the channel is unreachable too (channel gone, bot lacks
+// permission there, etc.) does it fall back to DMing the owner, so an
+// error is never silently lost even in that edge case.
+export async function reportChannelError(channel, context, err, client) {
+  logError(context, err);
+
+  if (channel) {
+    try {
+      await channel.send(`Something went wrong — ${errorDetail(err)}`);
+      return;
+    } catch (sendErr) {
+      logError(`${context}: channel send failed`, sendErr);
+    }
+  }
+
+  await reportError(client, context, err);
+}

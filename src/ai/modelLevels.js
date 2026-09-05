@@ -6,66 +6,62 @@
 // command itself, the modal handler, the cards it shows — ever prints a
 // model id, a provider name, or a version string back to Discord. It only
 // ever echoes the bare number Ameen typed, or a deliberately vague "that
-// level doesn't exist" for anything that isn't a real, currently-free
-// option below. This mirrors the "Your own internals" rule in gemini.js's
-// system instruction and the VENDOR_NAME_PATTERN redaction in
-// errorReporter.js — same intent (never reveal what's actually running
-// under the hood), applied here at the command layer instead of the
-// conversational one.
+// level doesn't exist" for anything that isn't a real, currently-reachable
+// option. This mirrors the "Your own internals" rule in gemini.js's system
+// instruction and the VENDOR_NAME_PATTERN redaction in errorReporter.js —
+// same intent (never reveal what's actually running under the hood),
+// applied here at the command layer instead of the conversational one.
 //
-// This module has no imports and knows nothing about Discord, the DB, or
-// the active-level cache in constantsStore.js — it's pure mapping/
-// validation logic, kept separate so it stays easy to update by hand
-// whenever the underlying provider ships or retires a model, or changes
-// what's free. There's no live lookup against the provider; this table
-// has to be kept current manually.
-//
-// `free: false` is for a level that IS a real, named model but isn't
-// available on the free tier right now (e.g. a Pro-only or subscription-
-// gated model) — treat it exactly like a level that doesn't exist at all
-// anywhere user-facing. resolveLevelInput() and modelIdForNumber() below
-// both already collapse that distinction on purpose; don't reintroduce it
-// in a caller.
-export const LEVELS = [
-  { number: '3.1', modelId: 'gemini-3.1-pro', free: false },
-  { number: '3.5', modelId: 'gemini-3.5-flash', free: true },
-  { number: '3.6', modelId: 'gemini-3.6-flash', free: true },
-  { number: '3.7', modelId: 'gemini-3.7-flash', free: false },
-  { number: '3.8', modelId: 'gemini-3.8-flash', free: false },
-];
+// The level number IS the Gemini Flash version number, full stop — this
+// bot only ever runs on the Flash line, so "3.5" means gemini-3.5-flash,
+// "3.6" means gemini-3.6-flash, and so on. There is deliberately no
+// per-level table mapping numbers to arbitrary/mixed model ids (Pro vs
+// Flash, different naming shapes, etc.) — the id is derived straight from
+// whatever number Ameen entered. That also means there's no local list of
+// "known" numbers to keep updated by hand when Google ships a new Flash
+// version; any well-formed number is handed straight to Google itself for
+// the real answer (see checkModelAccess in gemini.js, run once at
+// /level-set time from modals/levelModal.js) — this module only owns
+// input-shape validation, not which numbers currently exist or work.
+export const FLASH_MODEL_PREFIX = 'gemini-';
+export const FLASH_MODEL_SUFFIX = '-flash';
 
 // What a fresh install (or a DB row with no level saved yet) starts on —
 // matches the model this bot shipped with.
 export const DEFAULT_LEVEL_NUMBER = '3.5';
 
-// Resolves a level number to its backing model id, but ONLY if that level
-// both exists and is free — an unfree or unknown number both return null,
-// indistinguishably, by design (see the note on `free: false` above).
+// Builds the model id for a given level number. Pure string template, no
+// lookup table and no live check — this always "succeeds" in the sense
+// that it always returns *a* model id string; whether that model actually
+// exists is Google's call, made live by checkModelAccess.
 export function modelIdForNumber(number) {
-  const match = LEVELS.find((l) => l.number === number && l.free);
-  return match ? match.modelId : null;
+  return `${FLASH_MODEL_PREFIX}${number}${FLASH_MODEL_SUFFIX}`;
 }
 
 // Matches a plain non-negative number with at most one decimal point:
 // "3", "3.5", "12.9" — not "3.5.1", not "-3.5", not "3,5", not "3 .5", and
-// not anything with letters mixed in. Checked before the LEVELS lookup,
-// and deliberately kept as its own error class — "this isn't a number at
-// all" is a different, specific problem from "no such level", and callers
-// should say so plainly rather than folding it into the vague message.
+// not anything with letters mixed in. This is the only local validation
+// left — "this isn't a number at all" is a different, specific problem
+// from "no such level" (Google's answer, via checkModelAccess), and
+// callers should say so plainly rather than folding it into the vague
+// message.
 const NUMBER_PATTERN = /^\d+(\.\d+)?$/;
 
-// Validates and resolves raw modal input in one step. Return shapes:
-//   { ok: true, number: '3.5' }
-//     — well-formed, and matches a real, free level.
+// Validates and parses raw modal input in one step — format shape only.
+// This is deliberately NOT the final word on whether a level can be set:
+// it only rules out "not a number at all". The caller
+// (modals/levelModal.js) still owes the resolved modelId a live check
+// against Google (gemini.js's checkModelAccess) before treating the level
+// as actually settable — see the module comment above for why that split
+// exists. Return shapes:
+//   { ok: true, number: '3.5', modelId: 'gemini-3.5-flash' }
+//     — well-formed. Still needs a live check before it's actually
+//       applied; this says nothing about whether "3.5" is a real Flash
+//       version.
 //   { ok: false, reason: 'format', detail: '...' }
 //     — not a valid number at all (empty, malformed, out of shape). Safe
 //       to show `detail` to the user as-is — it never mentions models.
-//   { ok: false, reason: 'unknown' }
-//     — a well-formed number, but no matching free level. Covers both
-//       "no such level" and "that level exists but isn't free" — callers
-//       must show the same vague message for both, never branch on which
-//       one it actually was.
-export function resolveLevelInput(raw) {
+export function parseLevelInput(raw) {
   const trimmed = (raw ?? '').trim();
 
   if (trimmed === '') {
@@ -76,14 +72,10 @@ export function resolveLevelInput(raw) {
     return { ok: false, reason: 'format', detail: `"${trimmed}" is not a valid number — enter something like 3.5.` };
   }
 
-  // Compare numerically (not string-for-string) so equivalent forms like
-  // "3.50" and "3.5" resolve to the same level.
-  const value = Number(trimmed);
-  const match = LEVELS.find((l) => Number(l.number) === value);
+  // Normalized through Number() so equivalent forms like "3.50" and "3.5"
+  // both resolve to the same model id ("gemini-3.5-flash"), rather than
+  // literally templating whatever extra zeros Ameen happened to type.
+  const number = String(Number(trimmed));
 
-  if (!match || !match.free) {
-    return { ok: false, reason: 'unknown' };
-  }
-
-  return { ok: true, number: match.number };
+  return { ok: true, number, modelId: modelIdForNumber(number) };
 }

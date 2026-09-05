@@ -29,7 +29,7 @@ import * as logNoteButton from './buttons/logNoteButton.js';
 import * as deleteConfirmButton from './buttons/deleteConfirmButton.js';
 import * as editConfirmButton from './buttons/editConfirmButton.js';
 import * as editStartButton from './buttons/editStartButton.js';
-import { logError, reportError, errorDetail } from './errorReporter.js';
+import { logError, reportChannelError, errorDetail } from './errorReporter.js';
 import { startHealthServer } from './health.js';
 import { handleAiMessage, handleAiMessageBatch } from './aiMessageHandler.js';
 import { validateGeminiKeys } from './ai/gemini.js';
@@ -37,12 +37,18 @@ import { loadConstants } from './constantsStore.js';
 import { startDailyConversationReset } from './conversationReset.js';
 import { ensureMessageCursorTable, ensureChannelConversationsTable, setMessageCursor } from './db.js';
 import { catchUpMissedMessages } from './missedMessages.js';
+import { getTurnForMessage, cancelTurn } from './inflightTurns.js';
 
 dotenv.config();
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.DirectMessages, GatewayIntentBits.MessageContent],
-  partials: [Partials.Channel],
+  // Partials.Message is needed alongside Partials.Channel so messageDelete/
+  // messageUpdate still fire (as partials, with only an id guaranteed)
+  // for a message that fell out of the cache — without it discord.js
+  // simply drops those events for uncached messages, which would make the
+  // delete/edit-cancels-a-turn behavior in bot.js unreliable.
+  partials: [Partials.Channel, Partials.Message],
 });
 
 client.commands = new Collection();
@@ -128,7 +134,11 @@ async function processOwnerMessage(message) {
     try {
       await message.reply(`Something went wrong — ${errorDetail(err)}`);
     } catch (replyErr) {
-      await reportError(client, 'messageCreate error-reply failed', replyErr);
+      // The reply itself failed (e.g. the triggering message was deleted
+      // out from under us) — still try a plain send into the same
+      // channel before giving up and DMing the owner, so the error stays
+      // where it happened rather than defaulting straight to a DM.
+      await reportChannelError(message.channel, 'messageCreate error-reply failed', replyErr, client);
     }
   }
 }
@@ -166,7 +176,7 @@ async function processOwnerMessageBatch(messages) {
         try {
           await message.reply(`Something went wrong — ${errorDetail(err)}`);
         } catch (replyErr) {
-          await reportError(client, 'missedMessages individual error-reply failed', replyErr);
+          await reportChannelError(message.channel, 'missedMessages individual error-reply failed', replyErr, client);
         }
       }
     }
@@ -181,7 +191,7 @@ async function processOwnerMessageBatch(messages) {
     try {
       await last.reply(`Something went wrong catching up on ${messages.length} missed message(s) — ${errorDetail(err)}`);
     } catch (replyErr) {
-      await reportError(client, 'missedMessages batch error-reply failed', replyErr);
+      await reportChannelError(last.channel, 'missedMessages batch error-reply failed', replyErr, client);
     }
   }
 }
@@ -290,7 +300,7 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply(payload);
       }
     } catch (replyErr) {
-      await reportError(client, 'interaction error-reply failed', replyErr);
+      await reportChannelError(interaction.channel, 'interaction error-reply failed', replyErr, client);
     }
   }
 });
@@ -307,6 +317,70 @@ client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
   if (message.author.id !== process.env.DISCORD_OWNER_ID) return;
   await processOwnerMessage(message);
+});
+
+// Deleting a message that's currently mid-processing — either the owner's
+// own message that triggered an AI turn, or the bot's own "Thinking..."/
+// "Answering..." placeholder for that turn — cancels the turn: nothing is
+// posted or edited for it once it finishes (see inflightTurns.js and
+// aiMessageHandler.js's runAiTurn). This also covers /clear's own delete
+// pass, which wipes the placeholder the exact same way a manual delete
+// would; /clear additionally cancels proactively (see commands/clear.js)
+// so a turn doesn't even try to reply into a channel about to be wiped.
+client.on('messageDelete', (message) => {
+  const turn = getTurnForMessage(message.id);
+  if (turn) cancelTurn(turn);
+});
+
+// A bulk delete (from /clear itself, or the owner multi-selecting messages
+// in the Discord UI) fires this instead of individual messageDelete events
+// per message — same cancellation, just walking every id in the batch.
+client.on('messageDeleteBulk', (messages) => {
+  for (const message of messages.values()) {
+    const turn = getTurnForMessage(message.id);
+    if (turn) cancelTurn(turn);
+  }
+});
+
+// Editing a message before the bot has finished answering it retriggers
+// that turn with the updated content instead of letting a reply land for
+// the stale original text. If there's no turn in flight for the edited
+// message (it already got answered, or was never one to begin with — e.g.
+// editing an old message from days ago), this does nothing, same as
+// editing any other message always has.
+client.on('messageUpdate', async (oldMessage, newMessage) => {
+  try {
+    if (newMessage.partial) {
+      newMessage = await newMessage.fetch();
+    }
+  } catch (err) {
+    logError('messageUpdate: fetch partial failed', err);
+    return;
+  }
+  if (!newMessage.author || newMessage.author.bot) return;
+  if (newMessage.author.id !== process.env.DISCORD_OWNER_ID) return;
+
+  const turn = getTurnForMessage(newMessage.id);
+  if (!turn) return;
+
+  // Discord also fires messageUpdate for reasons that aren't a text edit
+  // at all — most commonly a link's embed populating a moment after the
+  // message was sent. Only actually retrigger when the text itself
+  // changed; if we can't tell (oldMessage came in as a partial with no
+  // cached content), fall through and retrigger anyway rather than risk
+  // silently ignoring a real edit.
+  if (!oldMessage.partial && oldMessage.content === newMessage.content) return;
+
+  cancelTurn(turn);
+  if (turn.placeholder) {
+    try {
+      await turn.placeholder.delete();
+    } catch (err) {
+      logError('messageUpdate: stale placeholder delete failed', err);
+    }
+  }
+
+  await processOwnerMessage(newMessage);
 });
 
 client.login(process.env.DISCORD_TOKEN).catch(async (err) => {

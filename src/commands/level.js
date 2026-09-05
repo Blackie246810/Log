@@ -13,7 +13,7 @@ export async function execute(interaction) {
     .setCustomId('level')
     .setLabel('Level')
     .setStyle(TextInputStyle.Short)
-    .setPlaceholder('e.g. 3.5')
+    .setPlaceholder('Whole or decimal number')
     .setValue(getLevel())
     .setRequired(true);
 

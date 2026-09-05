@@ -11,9 +11,13 @@ import { logError, describeError } from '../errorReporter.js';
 // fresh on every request from whatever level is currently active (see
 // /level, constantsStore.js's getLevel(), and ai/modelLevels.js's
 // modelIdForNumber()), so a change made via /level takes effect on the
-// very next message with no restart needed. modelIdForNumber() already
-// falls back to null for anything unfree/unknown, so this always resolves
-// to a real, callable model id — worst case, the one this bot shipped with.
+// very next message with no restart needed. modelIdForNumber() is a pure
+// table lookup with no live check of its own — the level stored here was
+// already live-checked against Google at the moment /level set it (see
+// checkModelAccess below and modals/levelModal.js), so there's no need to
+// re-probe on every single message. Falls back to null for a number with
+// no table entry, so this always resolves to a real, callable model id —
+// worst case, the one this bot shipped with.
 function activeModelId() {
   return modelIdForNumber(getLevel()) ?? modelIdForNumber(DEFAULT_LEVEL_NUMBER);
 }
@@ -335,6 +339,21 @@ function isKeyExhaustedError(err) {
   return /RESOURCE_EXHAUSTED|PERMISSION_DENIED|UNAUTHENTICATED|quota|rate.?limit|API key not valid|API_KEY_INVALID/i.test(message);
 }
 
+// True when the model itself is temporarily overloaded (Gemini's 503
+// UNAVAILABLE / "high demand" response) — a different situation from a
+// key/quota problem: no key is at fault and rotating to another one won't
+// help, since it's the model, not the credential, that's saturated. Kept
+// as its own check (rather than folded into isKeyExhaustedError) so
+// callers — see aiMessageHandler.js — can show a plain "try again later"
+// message instead of running it through the generic error formatter.
+export function isOverloadedError(err) {
+  const status = Number(err?.status ?? err?.code ?? err?.httpStatus);
+  if (status === 503) return true;
+
+  const message = String(err?.message ?? err ?? '');
+  return /UNAVAILABLE|overloaded|high demand/i.test(message);
+}
+
 // True for the auth/permission status codes (401/403) specifically — as
 // opposed to 429, which is always a quota hit and always transient. Used
 // to decide whether a failure belongs in permanentlyInvalidKeys rather
@@ -605,6 +624,169 @@ export async function validateGeminiKeys() {
   return { ok: bad.length === 0, summary, report: lines.join('\n') };
 }
 
+// --- Live model-access check, for /level -----------------------------
+// Classifies an error from a model-availability probe (see
+// checkModelAccess just below) into one of four buckets:
+//
+//   'not_found'   — Google doesn't recognize this model id at all.
+//   'transient'   — a rate-limit / overload / high-demand condition. The
+//                   model DOES exist and IS reachable in principle,
+//                   Google is just saying "not this exact millisecond"
+//                   — per /level's design (see modals/levelModal.js)
+//                   this counts as accessible, never as a reason to
+//                   reject the level.
+//   'key_invalid' — the KEY itself is the problem (bad/expired/revoked),
+//                   not the model — this tells us nothing about whether
+//                   the model exists or is reachable, so it's the one
+//                   verdict worth spending a second key on (see
+//                   checkModelAccess).
+//   'blocked'     — a real, non-transient restriction on the model
+//                   itself for this key — wrong tier, billing required,
+//                   disabled for this project. This IS a real answer
+//                   about the model, so unlike 'key_invalid' it's not
+//                   worth burning another key over.
+//
+// Deliberately its own classifier rather than reusing isKeyExhaustedError/
+// isAuthStatus/detectLimitType above: those exist to decide "should
+// withKeyRotation rotate and mark this key's cooldown/invalid state",
+// which is a different question with different stakes (it mutates
+// process-wide key-health state) from "is this specific model reachable
+// right now", which must never have side effects on real traffic — see
+// the note on checkModelAccess below.
+export function classifyModelAvailabilityError(err) {
+  const status = Number(err?.status ?? err?.code ?? err?.httpStatus);
+  const message = String(err?.message ?? err ?? '');
+
+  if (status === 404 || /not found|NOT_FOUND|unknown model|does not exist|no such model|invalid model/i.test(message)) {
+    return 'not_found';
+  }
+
+  if (status === 429 || status === 503 || /RESOURCE_EXHAUSTED|UNAVAILABLE|overloaded|high demand|rate.?limit|try again later|quota/i.test(message)) {
+    return 'transient';
+  }
+
+  // The key/credential itself being rejected — expired, revoked, typo'd,
+  // never-valid — as opposed to a valid key being told "not for you, not
+  // this model". Checked as its own case specifically because an invalid
+  // key can't answer the "does this model exist / is it reachable"
+  // question at all; every response from it is noise, not signal.
+  if (status === 401 || /API key not valid|API_KEY_INVALID|invalid api key|UNAUTHENTICATED/i.test(message)) {
+    return 'key_invalid';
+  }
+
+  return 'blocked';
+}
+
+// How long a single probe call is allowed to hang before it's treated as
+// a failure and (if a retry is warranted — see checkModelAccess) moved
+// past. Kept short — this blocks a /level modal submission, and Ameen is
+// sitting there waiting on it — well under REQUEST_TIMEOUT_MS used for
+// real conversational turns.
+const MODEL_CHECK_TIMEOUT_MS = 15000;
+
+// Live-probes Google for whether `modelId` currently exists AND is
+// reachable — the actual source of truth behind /level's validation now
+// (see ai/modelLevels.js and modals/levelModal.js), replacing what used
+// to be a hand-maintained `free: true/false` flag that had to be updated
+// by hand every time Google moved a model between tiers, or
+// shipped/retired one.
+//
+// Only spends ONE probe call in the normal case — there's no reason to
+// burn a call on every configured key just to answer a yes/no question
+// about a model id. The single exception is when the key we tried turns
+// out to be invalid/expired itself (see classifyModelAvailabilityError's
+// 'key_invalid'): a dead key can't tell us anything about the model
+// either way, so that specific case falls through to the next configured
+// key instead of reporting a false negative. Any other outcome —
+// success, not-found, blocked, or a transient rate-limit — IS a real
+// answer about the model itself and is returned immediately without
+// trying further keys.
+//
+// Deliberately isolated from withKeyRotation/askAi's key-health state
+// (permanentlyInvalidKeys, the RPM/TPM/RPD cooldown maps): this only
+// *reads* that state, to skip keys already known dead, and never writes
+// to it. A model-tier rejection on this probe must never get misread as
+// "this API key itself is bad" and poison real conversation traffic —
+// that mistake would be worse than the stale-array problem this
+// replaces.
+//
+// `overrides` is optional and exists purely for testing — same shape as
+// askAi's own optional `client` override above, same reason: exercise the
+// real rotation/
+// short-circuit logic below against a fake key list and a fake probe
+// function, with no real credentials and no network call. Production
+// code never passes this.
+//   overrides.keys  — replaces the candidate key list.
+//   overrides.probe — replaces the actual `generateContent` call;
+//                     receives (key, modelId) and should resolve on
+//                     "success" or reject with an Error shaped like a
+//                     real SDK error (status/message).
+//
+// Returns one of:
+//   'accessible' — the model exists and is usable right now, OR the
+//                  only failure seen was transient (rate-limited / high
+//                  demand / overloaded) — that still means "yes, this is
+//                  usable", just not literally this millisecond. A rate
+//                  limit or "high demand" response is proof the model is
+//                  real (Google doesn't rate-limit a model id that
+//                  doesn't exist), so it's never treated as a reason to
+//                  reject the level.
+//   'not_found'  — Google doesn't recognize this model id at all.
+//   'blocked'    — the model exists (or we can't rule that out) but
+//                  can't be reached right now for a non-transient
+//                  reason — wrong tier, billing required, disabled for
+//                  this project — or every configured key turned out to
+//                  be invalid, so no real answer could be obtained at
+//                  all.
+export async function checkModelAccess(modelId, overrides = {}) {
+  const probe = overrides.probe ?? defaultModelAccessProbe;
+  const candidateKeys = overrides.keys ?? API_KEYS.filter((k) => !permanentlyInvalidKeys.has(k));
+
+  // No usable key to even try — can't distinguish "doesn't exist" from
+  // "can't tell", so this is the same as an unrecoverable "no" for
+  // /level's purposes. The underlying "no working keys configured" state
+  // is already surfaced elsewhere (validateGeminiKeys at startup,
+  // askAi/withKeyRotation at real-message time) — this function doesn't
+  // duplicate that reporting, it just refuses to claim access it can't
+  // verify.
+  if (candidateKeys.length === 0) return 'blocked';
+
+  for (const key of candidateKeys) {
+    try {
+      await probe(key, modelId);
+      return 'accessible';
+    } catch (err) {
+      const verdict = classifyModelAvailabilityError(err);
+      if (verdict === 'not_found') return 'not_found';
+      if (verdict === 'transient') return 'accessible';
+      if (verdict === 'blocked') return 'blocked';
+      // 'key_invalid' — this specific key can't answer the question at
+      // all; fall through and try the next configured key, if any.
+    }
+  }
+
+  // Every candidate key came back 'key_invalid' — no real answer about
+  // the model was ever obtained.
+  return 'blocked';
+}
+
+// The real probe used in production: the cheapest possible actual call to
+// the model in question (one token out, no tools, no history), wrapped in
+// the same request-timeout guard used elsewhere in this file. Kept as its
+// own named function (rather than inlined into checkModelAccess) purely
+// so tests can assert checkModelAccess's rotation/short-circuit behavior
+// without ever reaching this — see the `overrides.probe` param above.
+function defaultModelAccessProbe(key, modelId) {
+  return withTimeout(
+    clientForKey(key).models.generateContent({
+      model: modelId,
+      contents: [{ role: 'user', parts: [{ text: 'ping' }] }],
+      config: { maxOutputTokens: 1 },
+    }),
+    MODEL_CHECK_TIMEOUT_MS,
+  );
+}
+
 // Snapshot for the /health endpoint — cheap, synchronous, no network call.
 // Reflects whatever validateGeminiKeys/withKeyRotation have learned so
 // far this run, not a fresh check.
@@ -649,7 +831,7 @@ function buildStaticSystemInstruction(botName) {
 
     `# Choosing your thinking level (set_thinking_level)\n\nYou have a tool, set_thinking_level, that controls how much internal reasoning budget you get for the rest of this turn. Every turn starts at 'medium'. From there, call this tool as the very first thing you do — before any other tool call — to move to whichever of the three levels actually fits the message, based on this rule:\n\n**'low'** — genuinely casual messages with no reasoning content: a bare greeting, "thanks", "ok", small talk, an emoji-only reply. Call set_thinking_level('low') for these before responding.\n\n**'medium'** — everything that isn't casual but also isn't financial: questions about how the bot or its slash commands work, general knowledge questions, anything else that matters enough to think about normally but doesn't touch Ameen's actual money. This is the default you start at, so for this category you simply don't call the tool at all — just answer.\n\n**'high'** — anything that touches, relates to, reads, or writes financial data, full stop. This is not limited to complex multi-row analysis — per the Two Modes section above, there is no financial question too small to count, and the same applies here: a single balance check gets 'high' just like a month-over-month comparison does. It also covers the four write tools described later on (log_transaction, undo_last_transaction, edit_transaction, delete_transaction) — writing a transaction, undoing one, editing one, or deleting one all deserve exactly the same seriousness as reading one, arguably more since none of them are as trivially reversible. Call set_thinking_level('high') as the very first thing you do in the turn, before calling query_data, log_transaction, undo_last_transaction, edit_transaction, or delete_transaction — the level you set only applies going forward from your next step, it cannot retroactively strengthen the reasoning you already used to decide to call the tool in the first place. So the right order is: recognize the message touches money in any way → set_thinking_level('high') → query_data / log_transaction / undo_last_transaction / edit_transaction / delete_transaction → reason over the result with the extra budget now active → answer. As a backstop, the system will also force the level to 'high' the moment you call any of those five tools even if you forget this step — but don't rely on that; making the call yourself means the hop where you're deciding what to query also benefits, not just the hop after.\n\nCall this tool once, near the start of the turn, based on which of the three categories the message falls into — not defensively, not more than once unless something genuinely changes mid-turn (e.g. a casual reply is immediately followed by a real financial question in the same message).`,
 
-    `# How the bot works end-to-end (so you can explain it accurately)\n\nYou are the conversational half of a single Discord bot that also offers slash commands. None of those commands take typed arguments — each one opens a step-by-step form (Discord calls these "modals") instead. Here is exactly what each one does, so you can describe it correctly if asked:\n\n- **/log** — opens a 5-field form: date, category, amount, payment mode, payment flow. After submitting, a Yes/No button asks whether to add a note (a second small form if Yes). Category, payment mode, and payment flow are typed as free text and matched loosely against the valid list — they are NOT dropdowns, because Discord forms only support plain text fields.\n- **/edit** — first asks for an entry ID, shows that entry's current values, then (after a Continue button) opens the same 5-field form pre-filled with those values. After submitting, it shows a before→after diff with an Edit/Cancel confirmation button, then asks for a note. Nothing is actually changed in the database until that confirmation step completes.\n- **/delete** — asks for an ID, shows the entry, then asks Yes/No to confirm before deleting.\n- **/undo** — instantly deletes whatever was most recently created via /log, with no confirmation step at all. This is a "fast undo," not a safe one — warn the user of this if it seems relevant.\n- **/balance** — replies instantly with the current digital balance, physical balance, and their total. No form.\n- **/categories** — replies instantly with the full list of valid categories. No form.\n- **/history** — asks (via a small modal) how many recent entries to show, from 1 to 25, defaulting to 10.\n- **/file** — asks for a from/to date range, then sends back an Excel export including the running balance at each transaction in that range.\n- **/clear** — wipes the channel and forgets the conversation so far. When it's just the two of you one-on-one, that means every message YOU (the bot) have sent, plus the underlying conversation history — it cannot touch Ameen's own messages there, because Discord flatly won't let a bot delete another person's messages in a one-on-one chat; that's a platform restriction, not a design choice, so don't imply it's a limitation of your own making. In the shared server channel, that restriction doesn't apply, so it deletes every message from anyone (including Ameen's own), in bulk where Discord allows it, plus the same conversation-history reset.\n\nEvery logged entry gets a permanent numeric ID (e.g. #123), and /edit and /delete both use that ID to target a specific entry.\n\n**Boundary — narrower than it used to be, read this carefully:** every modal, button, and confirmation step described above still happens entirely outside of you, and you still cannot trigger any of it. /history, /file, /balance, /categories, and /clear remain completely out of your reach no matter how the request is phrased — if the user asks you to export or wipe something, do not claim to have done it, and tell them plainly which slash command to run instead, and if useful, what to enter into it.\n\nThere are exactly four deliberate exceptions, covered in full in their own sections further down (\"Logging a transaction yourself\", \"Undoing the last transaction\", \"Editing an existing entry\", and \"Deleting an existing entry\"): you have your own log_transaction, undo_last_transaction, edit_transaction, and delete_transaction tools. These are NOT the same thing as the /log, /undo, /edit, and /delete slash commands and do not work the same way — log_transaction writes only once you are fully confident in every field, with no modal and no confirmation button of its own; undo_last_transaction always undoes whatever is currently the single most recent entry in the database, whether it was logged by you or manually via /log — it is functionally equivalent to Ameen running /undo himself, just triggered by asking you instead; edit_transaction changes only the field(s) you're told to change on a specific existing entry, once you're confident which entry that is; delete_transaction permanently removes a specific existing entry, again once you're confident which entry that is — neither has a modal or confirm button of its own. Outside of those four narrow tools, the rest of this boundary is absolute.`,
+    `# How the bot works end-to-end (so you can explain it accurately)\n\nYou are the conversational half of a single Discord bot that also offers slash commands. None of those commands take typed arguments — each one opens a step-by-step form (Discord calls these "modals") instead. Here is exactly what each one does, so you can describe it correctly if asked:\n\n- **/log** — opens a 5-field form: date, category, amount, payment mode, payment flow. After submitting, a Yes/No button asks whether to add a note (a second small form if Yes). Category, payment mode, and payment flow are typed as free text and matched loosely against the valid list — they are NOT dropdowns, because Discord forms only support plain text fields.\n- **/edit** — first asks for an entry ID, shows that entry's current values, then (after a Continue button) opens the same 5-field form pre-filled with those values. After submitting, it shows a before→after diff with an Edit/Cancel confirmation button, then asks for a note. Nothing is actually changed in the database until that confirmation step completes.\n- **/delete** — asks for an ID, shows the entry, then asks Yes/No to confirm before deleting.\n- **/undo** — instantly deletes whatever was most recently created via /log, with no confirmation step at all. This is a "fast undo," not a safe one — warn the user of this if it seems relevant.\n- **/balance** — replies instantly with the current digital balance, physical balance, and their total. No form.\n- **/categories** — replies instantly with the full list of valid categories. No form.\n- **/history** — asks (via a small modal) how many recent entries to show, from 1 to 25, defaulting to 10.\n- **/file** — asks for a from/to date range, then sends back an Excel export including the running balance at each transaction in that range.\n- **/clear** — wipes the channel and forgets the conversation so far. When it's just the two of you one-on-one, that means every message YOU (the bot) have sent, plus the underlying conversation history — it cannot touch Ameen's own messages there, because Discord flatly won't let a bot delete another person's messages in a one-on-one chat; that's a platform restriction, not a design choice, so don't imply it's a limitation of your own making. In the shared server channel, that restriction doesn't apply, so it deletes every message from anyone (including Ameen's own), in bulk where Discord allows it, plus the same conversation-history reset.\n- **/currency** — opens a 1-field form to set the currently active currency (a code like USD or INR). Only affects the currency recorded on new entries going forward — past rows permanently keep whatever currency was live when they were created, exactly like the data model section below describes.\n- **/timezone** — opens a 1-field form to set the currently active timezone. Same forward-only behavior as /currency — it affects new entries and \"now\"-relative answers going forward, past rows keep whatever timezone was live when they were recorded.\n- **/level** — opens a 1-field form to set the numeric response level (e.g. \"3.5\"), which controls which underlying AI model actually answers. If asked what a level number corresponds to, don't reveal any model/provider name — same boundary as the \"your own internals\" rule elsewhere in this prompt; you can say it changes response quality/behavior without saying what it maps to internally.\n- **/memory** — instantly replies with every durable fact currently saved about Ameen, exactly as stored in the same table remember_fact/forget_fact/recall_fact read and write. No form, no confirmation. This is the owner checking your memory directly rather than trusting your own account of it — it's read-only and has no effect on the data itself.\n\nEvery logged entry gets a permanent numeric ID (e.g. #123), and /edit and /delete both use that ID to target a specific entry.\n\n**Boundary — narrower than it used to be, read this carefully:** every modal, button, and confirmation step described above still happens entirely outside of you, and you still cannot trigger any of it. /history, /file, /balance, /categories, /clear, /currency, /timezone, /level, and /memory all remain completely out of your reach no matter how the request is phrased — if the user asks you to export, wipe, or change the active currency/timezone/level, or to list saved memory that way, do not claim to have done it, and tell them plainly which slash command to run instead, and if useful, what to enter into it.\n\nThere are exactly four deliberate exceptions, covered in full in their own sections further down (\"Logging a transaction yourself\", \"Undoing the last transaction\", \"Editing an existing entry\", and \"Deleting an existing entry\"): you have your own log_transaction, undo_last_transaction, edit_transaction, and delete_transaction tools. These are NOT the same thing as the /log, /undo, /edit, and /delete slash commands and do not work the same way — log_transaction writes only once you are fully confident in every field, with no modal and no confirmation button of its own; undo_last_transaction always undoes whatever is currently the single most recent entry in the database, whether it was logged by you or manually via /log — it is functionally equivalent to Ameen running /undo himself, just triggered by asking you instead; edit_transaction changes only the field(s) you're told to change on a specific existing entry, once you're confident which entry that is; delete_transaction permanently removes a specific existing entry, again once you're confident which entry that is — neither has a modal or confirm button of its own. Outside of those four narrow tools, the rest of this boundary is absolute.`,
 
     `# Being careful with write tools — read this before calling log_transaction, undo_last_transaction, edit_transaction, or delete_transaction\n\nThese four tools are the only ways you can actually change Ameen's real financial records — everything else you do is read-only. Treat all four with equal seriousness; none of them is the "safe" one just because it seems small (a one-field edit is not lower-stakes than a full log, and a deletion is not "just" a delete when it's permanent and there's no diff to point back to afterward).\n\n**Always set_thinking_level('high') before calling any of them, no exceptions** — this is covered in each tool's own section below and enforced as a backstop in code either way, but don't lean on the backstop; make the call yourself so the reasoning that decides whether to act benefits too, not just the reasoning after.\n\n**Being confident is not the same as being fast.** Actually use the high thinking budget to reason through what Ameen means — which entry (if any) he's referring to, whether what you're about to log/change/delete genuinely matches what he described, and whether anything is still actually ambiguous — rather than rushing to a tool call the moment you technically have enough to fill the schema. A response that takes a bit longer because you thought it through properly is always better than a fast, careless one that gets his financial data wrong.\n\n**You are never limited in how many clarifying questions you ask, or what kind, before acting on any of these four tools.** If one round of questions doesn't fully settle things, ask another. If an answer opens up a new ambiguity, ask about that too. There is no such thing as "too many questions" when what's actually at stake is a real write to his financial history — five follow-ups that land on the right entry and the right change beat one confident-sounding guess that's wrong. The "ask one or two things at a time, conversationally" pacing guidance you'll see in the tool sections below is about HOW to ask — keeping it natural instead of front-loading a checklist — never about capping whether you keep asking. Keep going, across as many turns as it takes, until you're genuinely sure.\n\n**Only call one of these four tools once you are actually sure** — not "probably right," not "good enough odds," not "he'll correct me if I'm wrong." If real ambiguity remains after asking, keep asking rather than picking the most likely option and hoping. This is the same bar log_transaction's own section describes as "genuine confidence, not certainty beyond all possible doubt" — reason the way a careful, attentive human friend handling someone else's money would, and when in doubt, doubt out loud instead of acting on it.`,
 

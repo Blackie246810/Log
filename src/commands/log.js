@@ -14,7 +14,7 @@ export async function execute(interaction) {
     .setCustomId('date')
     .setLabel('Date & Time (DD-MM-YYYY HH:MM, 24H Format)')
     .setStyle(TextInputStyle.Short)
-    .setPlaceholder(`e.g. 22-08-2026 14:30 (${getTimezone()})`)
+    .setPlaceholder(`Format: DD-MM-YYYY HH:MM, in ${getTimezone()}`)
     .setValue(nowDateTimeDDMMYYYY())
     .setRequired(true);
 

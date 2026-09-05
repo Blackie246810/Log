@@ -54,12 +54,19 @@ function zoneOffsetMs(date, timeZone) {
 // transitions (where the offset itself depends on the answer) resolve
 // correctly.
 function fromZonedParts({ year, month, day, hours = 0, minutes = 0, seconds = 0, ms = 0 }, timeZone) {
-  const guess = Date.UTC(year, month - 1, day, hours, minutes, seconds, ms);
+  // zoneOffsetMs reads back through Intl.DateTimeFormat, which has no
+  // milliseconds field — any `ms` baked into `guess` would silently be
+  // treated as 0 partway through the offset math and throw the result off
+  // by close to `ms`. So the offset is resolved entirely at whole-second
+  // precision, and `ms` is applied once at the very end as a plain epoch
+  // addition (never affected by the zone's offset, which is always a
+  // whole number of seconds).
+  const guess = Date.UTC(year, month - 1, day, hours, minutes, seconds);
   let offset = zoneOffsetMs(new Date(guess), timeZone);
   let utc = guess - offset;
   offset = zoneOffsetMs(new Date(utc), timeZone);
   utc = guess - offset;
-  return new Date(utc);
+  return new Date(utc + ms);
 }
 
 // Falls back to the live Constants timezone when `timeZone` is explicitly

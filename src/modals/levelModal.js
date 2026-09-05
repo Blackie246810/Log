@@ -1,5 +1,6 @@
 import { EmbedBuilder } from 'discord.js';
-import { resolveLevelInput } from '../ai/modelLevels.js';
+import { parseLevelInput } from '../ai/modelLevels.js';
+import { checkModelAccess } from '../ai/gemini.js';
 import { setLevel } from '../constantsStore.js';
 import { logError, errorDetail } from '../errorReporter.js';
 
@@ -17,11 +18,14 @@ function invalidInputCard(detail, given) {
     .setTimestamp();
 }
 
-// Deliberately vague: this fires both for a level that flat-out doesn't
-// exist and for one that exists but isn't free right now (see the note on
-// `free: false` in ai/modelLevels.js) — the two are indistinguishable here
-// on purpose, so nothing about what "level" actually maps to leaks through
-// even indirectly.
+// Deliberately vague: this fires both for a well-formed number Google
+// doesn't recognize as a real Flash version (checkModelAccess's
+// 'not_found') and for one that exists but isn't reachable right now for
+// a non-transient reason (checkModelAccess's 'blocked') — the two are
+// indistinguishable here on purpose, so nothing about what "level"
+// actually maps to leaks through even indirectly. A transient
+// rate-limit/high-demand hit from checkModelAccess is NOT one of these —
+// that still counts as success, see the success path below.
 function unknownLevelCard() {
   return new EmbedBuilder()
     .setColor(0xe74c3c)
@@ -40,24 +44,51 @@ function successCard(number) {
 
 export async function handle(interaction) {
   const raw = interaction.fields.getTextInputValue('level').trim();
-  const result = resolveLevelInput(raw);
+  const parsed = parseLevelInput(raw);
 
-  if (!result.ok) {
-    if (result.reason === 'format') {
-      await interaction.reply({ embeds: [invalidInputCard(result.detail, raw)] });
-    } else {
-      await interaction.reply({ embeds: [unknownLevelCard()] });
-    }
+  if (!parsed.ok) {
+    // parseLevelInput only ever fails with 'format' now — there's no
+    // local table to miss anymore (see ai/modelLevels.js), so a
+    // well-formed number always makes it through to the live check
+    // below, which is the only place a "no such level" verdict can come
+    // from.
+    await interaction.reply({ embeds: [invalidInputCard(parsed.detail, raw)] });
+    return;
+  }
+
+  // parseLevelInput only confirms the number maps to *something* in our
+  // local table — it says nothing about whether that model is actually
+  // usable right now. Google is the only source of truth for that (see
+  // checkModelAccess's own doc comment in ai/gemini.js), so this is
+  // checked live before the stored level is ever touched. A rate-limit/
+  // high-demand hit from checkModelAccess still resolves to 'accessible'
+  // — that's still a real, working level, just momentarily busy — only
+  // 'not_found' and 'blocked' are treated as a failure. The live check
+  // is a real network call, so the reply is deferred first rather than
+  // risking Discord's ~3s interaction-response window expiring.
+  await interaction.deferReply();
+
+  let access;
+  try {
+    access = await checkModelAccess(parsed.modelId);
+  } catch (err) {
+    logError('level-modal live check', err);
+    await interaction.editReply({ content: `Couldn't verify that level right now. ${errorDetail(err)}` });
+    return;
+  }
+
+  if (access !== 'accessible') {
+    await interaction.editReply({ embeds: [unknownLevelCard()] });
     return;
   }
 
   try {
-    await setLevel(result.number);
+    await setLevel(parsed.number);
   } catch (err) {
     logError('level-modal DB write', err);
-    await interaction.reply({ content: `Database error — level was not updated. ${errorDetail(err)}` });
+    await interaction.editReply({ content: `Database error — level was not updated. ${errorDetail(err)}` });
     return;
   }
 
-  await interaction.reply({ embeds: [successCard(result.number)] });
+  await interaction.editReply({ embeds: [successCard(parsed.number)] });
 }

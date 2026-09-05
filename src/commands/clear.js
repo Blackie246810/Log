@@ -1,6 +1,7 @@
 import { SlashCommandBuilder, InteractionContextType, ChannelType } from 'discord.js';
 import { logError, errorDetail } from '../errorReporter.js';
 import { clearConversation } from '../ai/gemini.js';
+import { cancelTurnsInChannel } from '../inflightTurns.js';
 
 // Discord's bulk-delete endpoint can only touch messages younger than this —
 // anything older has to go one-by-one regardless of channel type.
@@ -30,6 +31,13 @@ export async function execute(interaction) {
     await interaction.editReply({ content: 'Could not access this channel to clear messages.' });
     return;
   }
+
+  // Cancel any AI turn currently in flight in this channel before wiping
+  // anything — its "Thinking..." placeholder is about to be deleted below
+  // along with every other message here, and without this, that turn
+  // would still try to edit/reply into a message that's already gone the
+  // moment it finishes (see aiMessageHandler.js / inflightTurns.js).
+  cancelTurnsInChannel(channel.id);
 
   // Discord flatly does not allow a bot to delete another user's messages
   // in a DM — that's a platform restriction, not something any amount of
